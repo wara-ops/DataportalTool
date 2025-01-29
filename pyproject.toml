@@ -1,0 +1,39 @@
+[project]
+name = "dataportalclient"
+version = "0.3.0"
+description = "Simplifies managing datasets in the WARA-Ops dataportal"
+authors = [
+    {name = "Torgny Holmberg", email = "torgny.holmberg@ericsson.com"},
+    {name = "Robert Marklund", email = "robert.marklund@ericsson.com"},
+]
+dependencies = [
+    "requests==2.31.0",
+    "click==8.1.8",
+]
+requires-python = ">=3.10, <3.13"
+readme = "README.md"
+license = {text = "For Ericsson use only"}
+
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
+[tool.pdm.dev-dependencies]
+dev = [
+    "pytest>=7.4.3",
+    "pytest-mock>=3.12.0",
+    "tox>=4.11.4",
+    "ruff>=0.1.7",
+    "tox-pdm>=0.7.0",
+]
+
+[tool.pdm.scripts]
+test = "pytest"
+tox = "tox"
+lint = "ruff check"
+format = "ruff format"
+
+[tool.pytest.ini_options]
+testpaths = [
+    "tests"
+]
