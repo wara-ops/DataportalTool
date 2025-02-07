@@ -6,8 +6,8 @@ from datetime import datetime, timezone
 
 # Set default level
 logging.basicConfig(level=logging.WARN)
-_logger = logging.getLogger('dataportal.utils')
-_logger.setLevel(logging.DEBUG)
+_logger = logging.getLogger('toolslib.utils')
+_logger.setLevel(logging.INFO)
 logging.VERBOSE = 5
 logging.addLevelName(logging.VERBOSE, "VERBOSE")
 
