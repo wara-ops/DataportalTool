@@ -30,6 +30,9 @@ closed
 - User must exist in the Portal. In the examples below denoted ```user123```
 - A token is created and downloaded. In the examples below denoted ```user.token```
 
+### Naming convention
+[See here.](./namingconvention.md)
+
 ## Create a dataset
 ```sh
 ./main.py -c info.md -U user123 -t user.token

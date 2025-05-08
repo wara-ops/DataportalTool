@@ -1,4 +1,5 @@
-# WARA-Ops DataportalTools
+# dataportaltools
+ WARA-Ops DataportalTools
 
 <b>The compute portal repository can be found [here](https://gitlab.internal.ericsson.com/autodc/jupyterk8s)</b>
 
@@ -67,5 +68,23 @@ grep -o -E "^[^=]+" requirements.txt.old > requirements.txt
 # Update requirements.txt after output
 ```
 
+# Old instructions
+## Installation
+## prerequisite
 
-## Issues
+### install
+``` bash
+python3 -m pip install dataportaltools
+```
+
+### use
+
+### development
+#### install venv
+```
+./scripts/create-venv.sh
+```
+#### build
+``` bash
+python3 -m build
+```
