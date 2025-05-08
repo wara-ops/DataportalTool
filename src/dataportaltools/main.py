@@ -92,7 +92,9 @@ _log = logging.getLogger("base")
 )
 @click.option("--size", default="", help="Uncompressed file size (only log files)")
 @click.option("--kind", default="", help='Kind of data, either "log" or "metric"')
+@click.pass_context
 def main(
+    ctx,
     createdataset,
     user,
     upload,
@@ -111,57 +113,91 @@ def main(
     dtype,
     size,
     kind,
-) -> int:  # pylint: disable=R0911, R0913
+) -> None:  # pylint: disable=R0911, R0913
     """ """
 
     config.set_conf(locals())
     _log.debug("config %s", config.get())
 
-    wc = up.WCIBConnection(api, tokenfile=token)
 
+    ok = True
+    wc = up.WCIBConnection(api, tokenfile=token)
     try:
         wc.connect()
     except Exception as e:
         print(f"Failed to connect: {e}")
-        return 1
+        ok = False
+
+    if not ok:
+        ctx.exit(1)
 
     # if api != "http://127.0.0.1:3001/v1":
     #    return 1
 
-    try:
-        if createdataset is not None:
-            return wc.create_dataset(createdataset, user, dryrun)
+    ret = 0
 
-        if upload is not None:
-            if not isinstance(src, tuple):
-                return 1
 
-            datasetid = int(upload)
-            data = {
-                "datatype": dtype,
-                "dataflag": flag,
-                "start": start,
-                "stop": stop,
-                "count": count,
-                "size": size,
-            }
-            return wc.upload(datasetid, list(src), data, prefix, kind, dryrun)
+    if createdataset is not None:
+        try:
+            ret = wc.create_dataset(createdataset, user, dryrun)
+        except Exception as e:
+            print(f"Failed to execute: {e}")
+            ret = 1
 
-        if delete is not None:
+        ctx.exit(ret)
+
+    if upload is not None:
+        try:
+            if isinstance(src, tuple):
+                datasetid = int(upload)
+                data = {
+                    "datatype": dtype,
+                    "dataflag": flag,
+                    "start": start,
+                    "stop": stop,
+                    "count": count,
+                    "size": size,
+                }
+                ret = wc.upload(datasetid, list(src), data, prefix, kind, dryrun)
+            else:
+                ret = 1
+        except Exception as e:
+            print(f"Failed to execute: {e}")
+            ret = 1
+
+        ctx.exit(ret)
+
+    if delete is not None:
+        try:
             datasetid = int(delete)
-            return wc.delete(datasetid, dryrun)
+            ret = wc.delete(datasetid, dryrun)
+        except Exception as e:
+            print(f"Failed to execute: {e}")
+            ret = 1
 
-        if listdataset:
-            return wc.list_datasets(dryrun)
+        ctx.exit(ret)
 
-        if listfiles is not None:
+    if listdataset:
+        try:
+            ret = wc.list_datasets(dryrun)
+        except Exception as e:
+            print(f"Failed to execute: {e}")
+            ret = 1
+
+        ctx.exit(ret)
+
+    if listfiles is not None:
+        try:
             datasetid = int(listfiles)
-            return wc.list_files(datasetid, dryrun)
-    except Exception as e:
-        print(f"Failed to execute: {e}")
-        return 1
+            ret = wc.list_files(datasetid, dryrun)
+            ctx.exit(ret)
+        except Exception as e:
+            print(f"Failed to execute: {e}")
+            ret = 1
 
-    return 0
+        ctx.exit(ret)
+
+    ctx.exit()
 
 
 if __name__ == "__main__":

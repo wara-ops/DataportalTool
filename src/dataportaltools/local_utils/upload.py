@@ -486,7 +486,7 @@ class WCIBConnection:
         self,
         datasetid: int,
         src_list: list[str],
-        data: dict | None,
+        data: dict,
         prefix: str,
         kind: str,
         dryrun: bool,
