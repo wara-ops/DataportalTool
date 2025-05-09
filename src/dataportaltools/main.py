@@ -119,7 +119,6 @@ def main(
     config.set_conf(locals())
     _log.debug("config %s", config.get())
 
-
     ok = True
     wc = up.WCIBConnection(api, tokenfile=token)
     try:
@@ -135,7 +134,6 @@ def main(
     #    return 1
 
     ret = 0
-
 
     if createdataset is not None:
         try:
