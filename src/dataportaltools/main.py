@@ -7,8 +7,18 @@ import sys
 
 import click
 
-from .local_utils import config
-from .local_utils import upload as up
+try_load_again = False
+
+try:
+    from local_utils import config
+    from local_utils import upload as up
+except ImportError:
+    try_load_again = True
+
+if try_load_again:
+    from .local_utils import config
+    from .local_utils import upload as up
+
 
 # change name replace :%s/(base\|BASE\)/\=submatch(0) =~ '\l.*' ? 'myname' : 'MYNAME'/gc
 _log = logging.getLogger("base")
@@ -92,6 +102,9 @@ _log = logging.getLogger("base")
 )
 @click.option("--size", default="", help="Uncompressed file size (only log files)")
 @click.option("--kind", default="", help='Kind of data, either "log" or "metric"')
+@click.option(
+    "--force/--no-force", default=False, help="Force action (whan action is 'delete')"
+)
 @click.pass_context
 def main(
     ctx,
@@ -113,6 +126,7 @@ def main(
     dtype,
     size,
     kind,
+    force,
 ) -> None:  # pylint: disable=R0911, R0913
     """ """
 
@@ -168,7 +182,7 @@ def main(
     if delete is not None:
         try:
             datasetid = int(delete)
-            ret = wc.delete(datasetid, dryrun)
+            ret = wc.delete(datasetid, force, dryrun)
         except Exception as e:
             print(f"Failed to execute: {e}")
             ret = 1
@@ -188,7 +202,6 @@ def main(
         try:
             datasetid = int(listfiles)
             ret = wc.list_files(datasetid, dryrun)
-            ctx.exit(ret)
         except Exception as e:
             print(f"Failed to execute: {e}")
             ret = 1

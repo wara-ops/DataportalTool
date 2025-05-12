@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from typing import Optional
+from typing import Optional, Union
 
 import requests
 
@@ -10,7 +10,7 @@ from . import utils
 # Set default level
 logging.basicConfig(level=logging.WARN)
 _logger = logging.getLogger("toolslib.upload")
-_logger.setLevel(logging.INFO)
+_logger.setLevel(logging.DEBUG)
 logging.VERBOSE = 5
 logging.addLevelName(logging.VERBOSE, "VERBOSE")
 
@@ -39,7 +39,7 @@ class WCIBConnection:
         Creates a new dataset
     upload(datasetid, src_list, data, prefix, dryrun):
         Upload files to dataset
-    delete(datasetid, dryrun):
+    delete(datasetid, force, dryrun):
         Deletes a dataset
     list_datasets(dryrun):
         Lists user's datasets
@@ -482,6 +482,37 @@ class WCIBConnection:
 
         return ret, resp
 
+    def _list_files(
+        self, datasetid: int, extrafiles: bool, dryrun: bool, limit: int = 0
+    ) -> Union[list[dict], None]:
+        """ """
+        headers = {"Authorization": f"Bearer {self.token_data}"}
+
+        files = []
+        _extra = "true" if extrafiles else "false"
+
+        pth = f"{self.url}/dataset/{datasetid}/files?limit={limit}&extrafiles={_extra}"
+
+        j = {}
+
+        try:
+            if dryrun:
+                _logger.info("List files in dataset %d", datasetid)
+            else:
+                response = self._s.get(pth, headers=headers, timeout=self.timeout)
+                response.raise_for_status()
+                j = response.json()
+        except requests.exceptions.HTTPError as err:
+            _logger.error("list files failed, %s", str(err))
+            return None
+
+        _logger.debug(json.dumps(j, indent=3))
+
+        _files = j.get("data", [])
+        files.extend(_files)
+
+        return files
+
     def upload(
         self,
         datasetid: int,
@@ -551,7 +582,7 @@ class WCIBConnection:
 
         return ok
 
-    def delete(self, datasetid: int, dryrun: bool) -> int:
+    def delete(self, datasetid: int, force: bool, dryrun: bool) -> int:
         """
         Deletes a dataset
 
@@ -559,6 +590,8 @@ class WCIBConnection:
         ----------
         datasetid : int
             Dataset ID
+        force : bool
+            Indicate to delete even if dataset is nonempty
         dryrun : bool
             Indicate dryrun or not
 
@@ -574,6 +607,26 @@ class WCIBConnection:
         headers = {"Authorization": f"Bearer {self.token_data}"}
 
         pth = f"{self.url}/dataset/{datasetid}"
+
+        # Unless force, we will not remove non-empty datasets
+        if not force:
+            data_files = self._list_files(datasetid, False, dryrun, limit=1)
+            if data_files is None:
+                _logger.error("Failed to retrieve data files")
+                return 1
+
+            if len(data_files) > 0:
+                _logger.error("Dataset is not empty, data files exists")
+                return 1
+
+            extra_files = self._list_files(datasetid, True, dryrun, limit=1)
+            if extra_files is None:
+                _logger.error("Failed to retrieve extra files")
+                return 1
+
+            if len(extra_files) > 0:
+                _logger.error("Dataset is not empty, extra files exists")
+                return 1
 
         j = {}
         try:
@@ -671,29 +724,37 @@ class WCIBConnection:
         Raises
         ------
         """
-        headers = {"Authorization": f"Bearer {self.token_data}"}
+        # headers = {"Authorization": f"Bearer {self.token_data}"}
 
-        files = []
+        # files = []
 
-        pth = f"{self.url}/dataset/{datasetid}/files?limit=0&extrafiles=false"
+        # pth = f"{self.url}/dataset/{datasetid}/files?limit=0&extrafiles=false"
 
-        j = {}
+        # j = {}
 
-        try:
-            if dryrun:
-                _logger.info("List files in dataset %d", datasetid)
-            else:
-                response = self._s.get(pth, headers=headers, timeout=self.timeout)
-                response.raise_for_status()
-                j = response.json()
-        except requests.exceptions.HTTPError as err:
-            _logger.error("list files failed, %s", str(err))
+        # try:
+        #    if dryrun:
+        #        _logger.info("List files in dataset %d", datasetid)
+        #    else:
+        #        response = self._s.get(pth, headers=headers, timeout=self.timeout)
+        #        response.raise_for_status()
+        #        j = response.json()
+        # except requests.exceptions.HTTPError as err:
+        #    _logger.error("list files failed, %s", str(err))
+        #    return 1
+
+        # _logger.debug(json.dumps(j, indent=3))
+
+        # _files = j.get("data", [])
+        # files.extend(_files)
+
+        data_files = self._list_files(datasetid, False, dryrun)
+        if data_files is None:
             return 1
 
-        _logger.debug(json.dumps(j, indent=3))
-
-        _files = j.get("data", [])
-        files.extend(_files)
+        extra_files = self._list_files(datasetid, True, dryrun)
+        if extra_files is None:
+            return 1
 
         """
         ...
@@ -713,7 +774,7 @@ class WCIBConnection:
         {
             "FileID": 3,
             "MFileName": "apa.csv",
-            "DatasetID": 1,
+            "DatasetID": 1,§§§
             "OriginName": "Ericsson",
             "StartDate": null,
             "StopDate": null,
@@ -737,27 +798,39 @@ class WCIBConnection:
         print(
             "-------+--------------------------------+--------------------------------+------------+--------------+-----------------------"
         )
-        for entry in files:
-            # isExtra = entry.get('ExtraFile', 0) == 1
 
-            print(
-                fmt.format(
-                    entry["FileID"] or "n/a",
-                    entry["StartDate"] or "n/a",
-                    entry["StopDate"] or "n/a",
-                    entry["MetricEntries"] or "n/a",
-                    entry["FileSize"] or "n/a",
-                    entry["MFileName"],
+        for files in [data_files, extra_files]:
+            if not isinstance(files, list):
+                continue
+
+            _num_files = 0
+
+            for entry in files:
+                print(
+                    fmt.format(
+                        entry["FileID"] or "n/a",
+                        entry["StartDate"] or "n/a",
+                        entry["StopDate"] or "n/a",
+                        entry["MetricEntries"] or "n/a",
+                        entry["FileSize"] or "n/a",
+                        entry["MFileName"],
+                    )
                 )
-            )
 
-            num_files += 1
-            total_size += entry["FileSize"]
+                _num_files += 1
+                total_size += entry["FileSize"]
+
+            if _num_files > 0:
+                print(
+                    "-------+--------------------------------+--------------------------------+------------+--------------+-----------------------"
+                )
+
+            num_files += _num_files
 
         if num_files > 0:
-            print(
-                "-------+--------------------------------+--------------------------------+------------+--------------+-----------------------"
-            )
+            # print(
+            #    "-------+--------------------------------+--------------------------------+------------+--------------+-----------------------"
+            # )
             print(fmt.format(num_files, "", "", "", total_size, ""))
 
         return 0
