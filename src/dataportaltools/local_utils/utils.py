@@ -41,7 +41,7 @@ def parse_info(filename: str) -> dict:
             if (section is not None) and (txt != ""):
                 data[section] = txt.strip()
 
-            section = m.group(1).lower()
+            section = m.group(1).lower().strip()
 
             if "access" in section:
                 section = "access"
@@ -417,21 +417,24 @@ def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
     # required fields are start, stop and count
     _logger.debug("create_filename, data %s", json.dumps(data))
 
-    count = data.get("count", 0)
+    count = int(data.get("count", "0"))
     if count <= 0:
+        _logger.debug("create_filename, count %d", count)
         return False, ""
 
     start_o, start = _parse_time(data.get("start", ""))
     if start_o is None:
+        _logger.debug("create_filename, start_o %s", str(start_o))
         return False, ""
 
     stop_o, stop = _parse_time(data.get("stop", ""))
     if stop_o is None:
+        _logger.debug("create_filename, stop_o %s", str(stop_o))
         return False, ""
 
     # Sanity check
     if stop_o < start_o:
-        _logger.error("Stop time is earlier tan start time")
+        _logger.error("Stop time is earlier than start time")
         return False, ""
 
     # log
@@ -443,6 +446,7 @@ def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
     # dataflag is also needed
     dataflag = data.get("dataflag", "")
     if dataflag == "":
+        _logger.debug("create_filename, empty dataflag")
         return False, ""
 
     # inspect the tails
@@ -465,6 +469,7 @@ def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
             extension = m.group(2)
 
     if (base == "") or (extension == ""):
+        _logger.debug("create_filename, base or extension empty")
         return False, ""
 
     def _pretty(abc: str) -> str:

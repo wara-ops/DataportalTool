@@ -59,4 +59,3 @@ do
 done
 
 .venv/bin/dataportaltools -t user01.token -a "$PORTAL_API_URL" -d "$ID"
-
