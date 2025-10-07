@@ -65,7 +65,7 @@ class WCIBConnection:
         self.url = api_url
         self.token_file = tokenfile
         self.token_data = token
-        self.timeout = (180, 600)
+        self.timeout = (600, 1200)
         self._s = None
 
     def connect(self, session: Optional[object] = None) -> None:
