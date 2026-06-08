@@ -1,8 +1,0 @@
--r requirements.txt
-tox
-pylint
-flake8
-pytest
-build
-ruff
-build
