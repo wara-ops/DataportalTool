@@ -1,3 +1,5 @@
+"""HTTP client (WCIBConnection) for the WARA-Ops dataportal API."""
+
 import json
 import logging
 import os
@@ -13,6 +15,10 @@ _logger = logging.getLogger("toolslib.upload")
 _logger.setLevel(logging.DEBUG)
 logging.VERBOSE = 5
 logging.addLevelName(logging.VERBOSE, "VERBOSE")
+
+
+class WCIBError(Exception):
+    """Raised when a dataportal API operation cannot be completed."""
 
 
 class WCIBConnection:
@@ -83,10 +89,10 @@ class WCIBConnection:
         Exception of token not provided or server cannot be connected
         """
         if (self.token_file == "") and (self.token_data == ""):
-            raise Exception("No token provided")
+            raise WCIBError("No token provided")
 
         if self.token_data == "":
-            with open(self.token_file) as f:
+            with open(self.token_file, encoding="utf-8") as f:
                 tok = f.read()
                 self.token_data = tok.strip()
 
@@ -94,7 +100,7 @@ class WCIBConnection:
 
         response = self._s.get(f"{self.url}/test", timeout=self.timeout)
         if response.status_code >= 300:
-            raise Exception("Failed to test api")
+            raise WCIBError("Failed to test api")
 
     def create_dataset(self, infofile: str, user: str, dryrun: bool) -> int:
         """
@@ -122,7 +128,7 @@ class WCIBConnection:
         """
         data = utils.parse_info(infofile)
         if not utils.validate_info(data):
-            raise Exception("Invalid info file")
+            raise WCIBError("Invalid info file")
 
         # requets.post()
 
@@ -171,9 +177,7 @@ class WCIBConnection:
 
         fmt = "{:>9} | {:<40}"
         print(fmt.format("DatasetID", "ContainerName"))
-        print(
-            "----------+--------------------------------------------------------------------------------------------------"
-        )
+        print("-" * 10 + "+" + "-" * 98)
         print(fmt.format(j.get("DatasetID", "-"), j.get("ContainerName", "-")))
 
         return 0
@@ -247,15 +251,19 @@ class WCIBConnection:
             return {}
 
         pth = f"{self.url}/dataset/{datasetid}/extrafiles"
-        # payload = (('data', open(fname, 'rb')), ('prefix', prefix), ('filename', os.path.basename(fname)))
-        payload = (("data", open(fname, "rb")),)
 
         j = {}
 
         if not dryrun:
-            response = self._s.put(
-                pth, headers=headers, data=body, files=payload, timeout=self.timeout
-            )
+            with open(fname, "rb") as data_fh:
+                payload = (("data", data_fh),)
+                response = self._s.put(
+                    pth,
+                    headers=headers,
+                    data=body,
+                    files=payload,
+                    timeout=self.timeout,
+                )
             response.raise_for_status()
             j = response.json()
             _logger.debug("response %s", json.dumps(j))
@@ -266,6 +274,8 @@ class WCIBConnection:
 
         return j
 
+    # locals mirror the upload request fields plus the deterministic file handle
+    # pylint: disable=too-many-locals
     def _upload_data(
         self, datasetid: int, fname: str, data: dict, dryrun: bool
     ) -> dict:
@@ -332,15 +342,16 @@ class WCIBConnection:
 
             datafileid = j.get("fileId", -1)
             if datafileid < 0:
-                raise Exception(f"Failed to prepare file structures for {fname}")
+                raise WCIBError(f"Failed to prepare file structures for {fname}")
 
             headers = {"Authorization": f"Bearer {self.token_data}"}
             pth = f"{self.url}/dataset/{datasetid}/files/{datafileid}"
-            payload = (("data", (os.path.basename(fname), open(fname, "rb"))),)
 
-            response = self._s.put(
-                pth, headers=headers, files=payload, timeout=self.timeout
-            )
+            with open(fname, "rb") as data_fh:
+                payload = (("data", (os.path.basename(fname), data_fh)),)
+                response = self._s.put(
+                    pth, headers=headers, files=payload, timeout=self.timeout
+                )
             response.raise_for_status()
             j = response.json()
             _logger.debug("json response %s", json.dumps(j, indent=4))
@@ -387,12 +398,16 @@ class WCIBConnection:
                 v = resp_json.get("path", None)
                 if v is not None:
                     resp[f] = resp_json["path"]
+            # pylint: disable=broad-exception-caught
+            # per-file failures are logged and skipped so other files still upload
             except Exception as e:
                 _logger.error("Upload of %s failed, %s", f, str(e))
                 ret = 1
 
         return ret, resp
 
+    # parameters mirror the upload request fields
+    # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
     def _upload_data_files(
         self, datasetid: int, all_files: list[str], data: dict, kind: str, dryrun: bool
     ) -> tuple[int, dict]:
@@ -476,6 +491,8 @@ class WCIBConnection:
                 v = resp_json.get("path", None)
                 if v is not None:
                     resp[fname] = resp_json["path"]
+            # pylint: disable=broad-exception-caught
+            # per-file failures are logged and skipped so other files still upload
             except Exception as e:
                 _logger.error("Upload of %s failed, %s", fname, str(e))
                 ret = 1
@@ -513,6 +530,8 @@ class WCIBConnection:
 
         return files
 
+    # parameters mirror the upload request fields
+    # pylint: disable=too-many-arguments,too-many-positional-arguments
     def upload(
         self,
         datasetid: int,
@@ -541,7 +560,8 @@ class WCIBConnection:
                     "size": int | str,
                 }
         prefix : str
-            Prefix (upload dir) for extrafiles. If set, file as assumed to be extrafile regardless of naming or parameters.
+            Prefix (upload dir) for extrafiles. If set, file is assumed to be an
+            extrafile regardless of naming or parameters.
         kind : str
             Either "log" or "metric"
         dryrun : bool
@@ -574,9 +594,7 @@ class WCIBConnection:
 
         fmt = "{:<50} | {:<50}"
         print(fmt.format("Source", "Dest"))
-        print(
-            "---------------------------------------------------+-------------------------------------------------------------"
-        )
+        print("-" * 51 + "+" + "-" * 61)
         for src, dst in resp.items():
             print(fmt.format(src, dst))
 
@@ -690,9 +708,7 @@ class WCIBConnection:
                 "DatasetID", "DatasetName", "CreateDate", "Category", "Organization"
             )
         )
-        print(
-            "----------+------------------------------------------+--------------------------------+------------+---------------"
-        )
+        print("+".join("-" * n for n in (10, 42, 32, 12, 15)))
         for entry in datasets:
             print(
                 fmt.format(
@@ -756,48 +772,46 @@ class WCIBConnection:
         if extra_files is None:
             return 1
 
-        """
-        ...
-         {
-         "FileID": 59,
-         "MFileName": "testupload1731423091_float_2009-10-10T00:10:18.000_2009-10-10T00:10:19.000_9_raw.zstd",
-         "DatasetID": 3,
-         "OriginName": "Ericsson",
-         "StartDate": "2009-10-10T00:10:18.000Z",
-         "StopDate": "2009-10-10T00:10:19.000Z",
-         "FileSize": 2097152,
-         "MetricEntries": 9,
-         "MetricType": "float",
-         "Uuid": "c666a272-b2d6-428a-bc3a-9a7675c40914",
-         "ExtraFile": 0
-         },
-        {
-            "FileID": 3,
-            "MFileName": "apa.csv",
-            "DatasetID": 1,§§§
-            "OriginName": "Ericsson",
-            "StartDate": null,
-            "StopDate": null,
-            "FileSize": 1442,
-            "MetricEntries": null,
-            "MetricType": null,
-            "Uuid": "0209882d-6f3b-4275-b92e-ff42baea7e36",
-            "ExtraFile": 1
-            },
-        ...
-        """
+        # Example API JSON shape for the files listing:
+        # ...
+        #  {
+        #  "FileID": 59,
+        #  "MFileName": "testupload1731423091_float_2009-10-10T00:10:18.000_..._raw.zstd",
+        #  "DatasetID": 3,
+        #  "OriginName": "Ericsson",
+        #  "StartDate": "2009-10-10T00:10:18.000Z",
+        #  "StopDate": "2009-10-10T00:10:19.000Z",
+        #  "FileSize": 2097152,
+        #  "MetricEntries": 9,
+        #  "MetricType": "float",
+        #  "Uuid": "c666a272-b2d6-428a-bc3a-9a7675c40914",
+        #  "ExtraFile": 0
+        #  },
+        # {
+        #     "FileID": 3,
+        #     "MFileName": "apa.csv",
+        #     "DatasetID": 1,
+        #     "OriginName": "Ericsson",
+        #     "StartDate": null,
+        #     "StopDate": null,
+        #     "FileSize": 1442,
+        #     "MetricEntries": null,
+        #     "MetricType": null,
+        #     "Uuid": "0209882d-6f3b-4275-b92e-ff42baea7e36",
+        #     "ExtraFile": 1
+        #     },
+        # ...
 
         num_files = 0
         total_size = 0
         fmt = "{:>6} | {:>30} | {:>30} | {:>10} | {:>12} | {}"
+        separator = "+".join("-" * n for n in (7, 32, 32, 12, 14, 23))
         print(
             fmt.format(
                 "FileID", "StartDate", "StopDate", "Entries", "FileSize", "MFileName"
             )
         )
-        print(
-            "-------+--------------------------------+--------------------------------+------------+--------------+-----------------------"
-        )
+        print(separator)
 
         for files in [data_files, extra_files]:
             if not isinstance(files, list):
@@ -821,16 +835,11 @@ class WCIBConnection:
                 total_size += entry["FileSize"]
 
             if _num_files > 0:
-                print(
-                    "-------+--------------------------------+--------------------------------+------------+--------------+-----------------------"
-                )
+                print(separator)
 
             num_files += _num_files
 
         if num_files > 0:
-            # print(
-            #    "-------+--------------------------------+--------------------------------+------------+--------------+-----------------------"
-            # )
             print(fmt.format(num_files, "", "", "", total_size, ""))
 
         return 0

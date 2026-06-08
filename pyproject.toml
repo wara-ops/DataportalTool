@@ -1,13 +1,14 @@
 [project]
 name = "dataportaltools"
-version = "0.0.2"
+version = "0.0.1"
 description = "Simplifies managing datasets in the WARA-Ops dataportal"
 authors = [
-    {name = "Torgny Holmberg",email = "torgny.holmberg@ericsson.com"},
+    {name = "Torgny Holmberg", email = "torgny.holmberg@ericsson.com"},
+    {name = "Robert Marklund", email = "robert.marklund@ericsson.com"},
 ]
 dependencies = [
-    "requests==2.31.0",
-    "click==8.1.8",
+    "requests~=2.34",
+    "click~=8.4",
 ]
 requires-python = ">=3.10, <3.15"
 readme = "README.md"
@@ -24,27 +25,55 @@ build-backend = "pdm.backend"
 [tool.pdm]
 distribution = true
 
-[tool.pdm.dev-dependencies]
-dev = [
-    "pytest>=7.4.3",
-    "pytest-mock>=3.12.0",
-    "tox>=4.11.4",
-    "ruff>=0.1.7",
-    "tox-pdm>=0.7.0",
-]
-
 [tool.pdm.scripts]
 test = "pytest"
 tox = "tox"
-lint = "ruff check"
+lint = {composite = ["ruff check", "pylint src/dataportaltools"]}
 format = "ruff format"
+audit = "pip-audit -r requirements.txt"
 
 [tool.pytest.ini_options]
 testpaths = [
     "tests"
+]
+addopts = "--cov=dataportaltools --cov-report=term-missing --cov-fail-under=90"
+
+[tool.coverage.run]
+source = ["dataportaltools"]
+omit = ["*/__main__.py"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
 ]
 
 [tool.ruff]
 # Enable basic checks
 lint.select = ["E", "F"]
 lint.ignore = ["E501"]
+
+[tool.pylint.main]
+# requests is resolved at runtime; not always present in the lint env.
+ignored-modules = ["requests"]
+
+[tool.pylint.format]
+max-line-length = 100
+
+[tool.pylint."messages control"]
+# E1120: Click's decorators inject the command arguments at call time, so
+#        pylint cannot see that main() is invoked with all parameters.
+disable = ["no-value-for-parameter"]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.4.3",
+    "pytest-mock>=3.12.0",
+    "pytest-cov>=4.1.0",
+    "tox>=4.11.4",
+    "ruff>=0.1.7",
+    "pylint>=4.0.5",
+    "tox-pdm>=0.7.0",
+    "pip-audit>=2.10.0",
+]

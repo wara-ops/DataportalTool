@@ -1,5 +1,6 @@
-# flake8: noqa: ANN001
 #!/usr/bin/env python3
+# flake8: noqa: ANN001
+"""Command-line entry point for the WARA-Ops dataportaltools client."""
 
 import logging
 import os
@@ -7,20 +8,16 @@ import sys
 
 import click
 
-try_load_again = False
-
 try:
-    from local_utils import config
-    from local_utils import upload as up
-except ImportError:
-    try_load_again = True
-
-if try_load_again:
+    # Normal case: installed/imported as part of the package.
     from .local_utils import config
     from .local_utils import upload as up
+except ImportError:
+    # Fallback: running this file directly (``python main.py``).
+    from local_utils import config
+    from local_utils import upload as up
 
 
-# change name replace :%s/(base\|BASE\)/\=submatch(0) =~ '\l.*' ? 'myname' : 'MYNAME'/gc
 _log = logging.getLogger("base")
 
 
@@ -76,7 +73,8 @@ _log = logging.getLogger("base")
     "-t",
     default="",
     metavar="<token file>",
-    help="Name of file containing token",
+    help="Name of file containing token. If omitted, the token value is read "
+    "from the PORTAL_TOKEN environment variable.",
 )
 @click.option(
     "--api",
@@ -88,7 +86,8 @@ _log = logging.getLogger("base")
 @click.option(
     "--start",
     default="",
-    help="Timestamp of first event in file, YYYY-MM-ddThh:mm:ss[.uuu], e.g. 2022-12-26T00:00:00_2022-12-27T00:00:00",
+    help="Timestamp of first event in file, YYYY-MM-ddThh:mm:ss[.uuu], "
+    "e.g. 2022-12-26T00:00:00",
 )
 @click.option("--stop", default="", help="Timestamp of last event in file")
 @click.option("--count", default=0, help="Number of events in the file")
@@ -127,17 +126,25 @@ def main(
     size,
     kind,
     force,
-) -> None:  # pylint: disable=R0911, R0913
-    """ """
+) -> None:
+    # This is a Click command exposing the full CLI surface, so the large
+    # number of options/branches maps directly onto the documented commands.
+    # pylint: disable=too-many-arguments,too-many-positional-arguments
+    # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+    """Dispatch a single dataportal operation based on the given options."""
 
     config.set_conf(locals())
     _log.debug("config %s", config.get())
 
     ok = True
-    wc = up.WCIBConnection(api, tokenfile=token)
+    # A token file passed via -t takes precedence; otherwise fall back to the
+    # token value in the PORTAL_TOKEN environment variable.
+    env_token = os.environ.get("PORTAL_TOKEN", "")
+    wc = up.WCIBConnection(api, tokenfile=token, token="" if token else env_token)
     try:
         wc.connect()
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        # Top-level CLI boundary: report any failure and exit non-zero.
         print(f"Failed to connect: {e}")
         ok = False
 
@@ -152,7 +159,8 @@ def main(
     if createdataset is not None:
         try:
             ret = wc.create_dataset(createdataset, user, dryrun)
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            # CLI boundary: surface any operation failure as a non-zero exit.
             print(f"Failed to execute: {e}")
             ret = 1
 
@@ -173,7 +181,8 @@ def main(
                 ret = wc.upload(datasetid, list(src), data, prefix, kind, dryrun)
             else:
                 ret = 1
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            # CLI boundary: surface any operation failure as a non-zero exit.
             print(f"Failed to execute: {e}")
             ret = 1
 
@@ -183,7 +192,8 @@ def main(
         try:
             datasetid = int(delete)
             ret = wc.delete(datasetid, force, dryrun)
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            # CLI boundary: surface any operation failure as a non-zero exit.
             print(f"Failed to execute: {e}")
             ret = 1
 
@@ -192,7 +202,8 @@ def main(
     if listdataset:
         try:
             ret = wc.list_datasets(dryrun)
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            # CLI boundary: surface any operation failure as a non-zero exit.
             print(f"Failed to execute: {e}")
             ret = 1
 
@@ -202,7 +213,8 @@ def main(
         try:
             datasetid = int(listfiles)
             ret = wc.list_files(datasetid, dryrun)
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            # CLI boundary: surface any operation failure as a non-zero exit.
             print(f"Failed to execute: {e}")
             ret = 1
 

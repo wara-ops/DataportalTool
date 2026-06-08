@@ -95,10 +95,9 @@ ipython_config.py
 #Pipfile.lock
 
 # UV
-#   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#uv.lock
+#   This project uses pdm; uv.lock (if produced by a local uvx/uv run) is not
+#   tracked. requirements.txt + pyproject.toml are the source of truth.
+uv.lock
 
 # poetry
 #   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
@@ -108,8 +107,9 @@ ipython_config.py
 #poetry.lock
 
 # pdm
-#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
-#pdm.lock
+#   This is a library/CLI; requirements.txt + pyproject.toml are the source of
+#   truth for dependencies, so the resolver lockfile is not tracked.
+pdm.lock
 #   pdm stores project-wide configurations in .pdm.toml, but it is recommended to not include it
 #   in version control.
 #   https://pdm.fming.dev/latest/usage/project/#working-with-version-control

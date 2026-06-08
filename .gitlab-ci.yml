@@ -1,0 +1,85 @@
+# GitLab CI for dataportaltools.
+#
+# Runs ruff + pylint once, then the test suite (with the >=90% coverage gate
+# configured in pyproject.toml) against every non-EOL Python version, plus a
+# non-blocking dependency CVE scan (pip-audit).
+# Uses pdm + tox-pdm so CI matches `pdm run tox` locally.
+
+stages:
+  - lint
+  - test
+  - audit
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  PDM_CHECK_UPDATE: "false"
+
+cache:
+  paths:
+    - .cache/pip
+
+.install_pdm: &install_pdm
+  - python -m pip install --upgrade pip
+  - pip install pdm tox-pdm
+
+lint:
+  stage: lint
+  image: python:3.12-slim
+  before_script:
+    - *install_pdm
+  script:
+    - pdm install --dev
+    - pdm run ruff check
+    - pdm run ruff format --check
+    - pdm run pylint src/dataportaltools
+
+# One job per non-EOL Python version. Each runs the matching tox environment,
+# which executes pytest (and therefore the coverage gate).
+.test_template: &test_template
+  stage: test
+  before_script:
+    - *install_pdm
+  script:
+    - tox -e $TOX_ENV
+
+test:py310:
+  <<: *test_template
+  image: python:3.10-slim
+  variables:
+    TOX_ENV: py310
+
+test:py311:
+  <<: *test_template
+  image: python:3.11-slim
+  variables:
+    TOX_ENV: py311
+
+test:py312:
+  <<: *test_template
+  image: python:3.12-slim
+  variables:
+    TOX_ENV: py312
+
+test:py313:
+  <<: *test_template
+  image: python:3.13-slim
+  variables:
+    TOX_ENV: py313
+
+test:py314:
+  <<: *test_template
+  image: python:3.14-slim
+  variables:
+    TOX_ENV: py314
+
+# Dependency CVE scan. allow_failure keeps it non-blocking: advisories are
+# surfaced without failing the pipeline.
+audit:
+  stage: audit
+  image: python:3.12-slim
+  allow_failure: true
+  before_script:
+    - *install_pdm
+  script:
+    - pdm install --dev
+    - pdm run audit

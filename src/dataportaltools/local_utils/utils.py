@@ -1,3 +1,5 @@
+"""Filename parsing, validation and construction helpers for the CLI."""
+
 import glob
 import json
 import logging
@@ -13,6 +15,9 @@ logging.addLevelName(logging.VERBOSE, "VERBOSE")
 
 
 def parse_info(filename: str) -> dict:
+    # The Markdown section parser is a small state machine; the extra branches
+    # keep the parsing readable in one place rather than split across helpers.
+    # pylint: disable=too-many-branches
     """
     Extracts information fields from named file needed when creating a new dataset
 
@@ -29,7 +34,7 @@ def parse_info(filename: str) -> dict:
     Raises
     ------
     """
-    with open(filename) as f:
+    with open(filename, encoding="utf-8") as f:
         info = f.read()
 
     data = {}
@@ -166,16 +171,11 @@ def valid_date(s: str) -> bool:
 
 def parse_filename(fname: str) -> tuple[str, dict]:
     """
-    Inspects that filename follows the naming convention
+    Inspect that ``fname`` follows the dataset naming convention.
 
-    metric:
-    <name>_<type>_<time-start>_<time-end>_<entry-count>_<data-flag>.<extension>[.<compression-method>]
-    example: history_float_2022-12-26T00:00:00_2022-12-27T00:00:00_140190_preprocessed-and-anonymized.pkl.zst
-
-    log:
-    <name>_<time-start>_<time-end>_<entry-count>_<uncompressed-size>_<data-flag>[.<data-type>].<compression-method>
-    example: logstash-flow_2023-02-16T23:59:56_2023-02-16T20:50:30_7721801_8.168GB_raw.json.zstd
-
+    See ``src/namingconvention.md`` for the full metric and log formats.
+    A metric name has six underscore-separated fields plus a ``type`` field;
+    a log name has six fields including an uncompressed ``size``.
 
     Parameters
     ----------
@@ -199,7 +199,8 @@ def parse_filename(fname: str) -> tuple[str, dict]:
             }
 
     "extra", {}
-         Default. Fits files that fails the naming convention and therefore is assumed to be extra file.
+         Default. Used for files that fail the naming convention and are
+         therefore assumed to be extra files.
 
     Raises
     ------
@@ -272,21 +273,23 @@ def parse_filename(fname: str) -> tuple[str, dict]:
                 "compression": m.group(7),
                 "prefix": m.group(3)[0:4],
             }
-        else:
-            # invalid date(s)
-            pass
+        # invalid date(s)
 
     return "extra", {}
 
 
 def _parse_time(s: str) -> tuple[object, str]:
-    """ """
+    """Parse an ISO-8601 or epoch timestamp into a (datetime, normalized) pair.
+
+    Returns ``(None, "")`` for empty or unparseable input. The normalized
+    string uses the ``YYYY-MM-DDThh:mm:ss[.uuu]Z`` form expected by the API.
+    """
     if s == "":
-        return ""
+        return None, ""
 
     try:
         time_f = float(s)
-    except Exception as e:
+    except ValueError as e:
         _logger.debug("Not epoch, it seems, %s", str(e))
         time_f = -1.0
 
@@ -300,15 +303,15 @@ def _parse_time(s: str) -> tuple[object, str]:
 
         try:
             time_o = datetime.fromtimestamp(time_f, timezone.utc)
-        except Exception as e:
-            _logger.debug(f"Not epoch, it seems, {e}")
+        except (ValueError, OverflowError, OSError) as e:
+            _logger.debug("Not epoch, it seems, %s", str(e))
             return None, ""
     else:
         # last chance for parsing the date string
         try:
             time_o = datetime.fromisoformat(s)
-        except Exception as e:
-            _logger.debug(f"Invalid date format '{s}', {e}")
+        except ValueError as e:
+            _logger.debug("Invalid date format '%s', %s", s, str(e))
             return None, ""
 
     if time_o is None:
@@ -321,64 +324,17 @@ def _parse_time(s: str) -> tuple[object, str]:
         time_ts = time_ts[:-3]
     time_ts = f"{time_ts}Z"
 
-    _logger.debug(f"time_ts {time_ts}")
+    _logger.debug("time_ts %s", time_ts)
 
     return time_o, time_ts
 
 
-# def shall_construct_name(data : dict | None) -> bool:
-#     """
-#     """
-#     if data is None:
-#         return False
-
-#     prefix = data.get("prefix", "")
-#     if prefix:
-#         # all other fields must be unset
-#         # must not be confusing naming
-#         if data.get("datatype", "") != "":
-#             raise Exception("Confusing: datatype is set")
-
-#         if data.get("dataflag", "") != "":
-#             raise Exception("Confusing: dataflag is set")
-
-#         if data.get("start", "") != "":
-#             raise Exception("Confusing: start is set")
-
-#         if data.get("stop", "") != "":
-#             raise Exception("Confusing: stop is set")
-
-#         if data.get("count", 0) != 1:
-#             raise Exception("Confusing: count is set")
-
-#         if data.get("size", "") != "":
-#             raise Exception("Confusing: size is set")
-
-#         return False
-
-#     # prefix is not set
-#     if data.get("datatype", "") == "":
-#         return False
-
-#     if data.get("dataflag", "") == "":
-#         return False
-
-#     if data.get("start", "") == "":
-#         return False
-
-#     if data.get("stop", "") == "":
-#         return False
-
-#     if data.get("count", 0) <= 0:
-#         return False
-
-#     # if data.get("size", "") == "":
-#     #     return False
-
-#     return True
-
-
 def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
+    # This builds a name from many independent fields and validates each one
+    # with an early return, which is clearer than nesting; the resulting
+    # statement/branch/return counts are inherent to that validation.
+    # pylint: disable=too-many-branches,too-many-return-statements
+    # pylint: disable=too-many-statements,too-many-locals
     """
     Creates a filename that follows the naming convention using data
 
@@ -409,7 +365,7 @@ def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
     """
     if kind not in ["metric", "log"]:
         _logger.error(
-            "create_filename, unable to create a filename since 'kind' is not set, kind '%s'",
+            "create_filename, cannot build a name without a valid 'kind', got '%s'",
             kind,
         )
         return False, ""
@@ -437,11 +393,7 @@ def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
         _logger.error("Stop time is earlier than start time")
         return False, ""
 
-    # log
-    # <name>_<time-start>_<time-end>_<entry-count>_<uncompressed-size>_<data-flag>[.<data-type>].<compression-method
-
-    # metric
-    # <name>_<type>_<time-start>_<time-end>_<entry-count>_<data-flag>.<extension>[.<compression-method>]
+    # See src/namingconvention.md for the metric and log field layouts.
 
     # dataflag is also needed
     dataflag = data.get("dataflag", "")
@@ -494,11 +446,11 @@ def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
             _logger.error("Log file is not compressed")
             return False, ""
 
-        # log
-        # <name>_<time-start>_<time-end>_<entry-count>_<uncompressed-size>_<data-flag>[.<data-type>].<compression-method
-
         if datatype:
-            new_name = f"{base}_{start}_{stop}_{count}_{size}_{dataflag}.{extension}.{compression}"
+            new_name = (
+                f"{base}_{start}_{stop}_{count}_{size}_{dataflag}"
+                f".{extension}.{compression}"
+            )
         else:
             new_name = f"{base}_{start}_{stop}_{count}_{size}_{dataflag}.{compression}"
 
@@ -507,9 +459,6 @@ def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
             _logger.error("Metric file is missing datatype")
             return False, ""
 
-        # metric
-        # <name>_<type>_<time-start>_<time-end>_<entry-count>_<data-flag>.<extension>[.<compression-method>]
-
         datatype = _pretty(datatype)
 
         new_name = f"{base}_{datatype}_{start}_{stop}_{count}_{dataflag}.{extension}"
@@ -517,130 +466,3 @@ def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
             new_name = f"{new_name}.{compression}"
 
     return True, new_name
-
-
-if __name__ == "__main__":
-    s, _ = parse_filename(
-        "history_2024-01-31T23:00:00Z_2024-01-31T23:59:59Z_3000_76Mb.json.zip"
-    )
-    assert s == "extra"
-
-    s, d = parse_filename(
-        "history_2024-01-31T23:00:00Z_2024-01-31T23:59:59Z_3000_76Mb_raw.json.bz2"
-    )
-    assert s == "log"
-    assert d["compression"] == "bz2"
-    assert d["type"] == "json"
-    assert d["flag"] == "raw"
-
-    s, d = parse_filename(
-        "history_2024-01-31T23:00:00Z_2024-01-31T23:59:59Z_3000_76Mb_raw.bz2"
-    )
-    assert s == "log"
-    assert d["compression"] == "bz2"
-    assert d["flag"] == "raw"
-
-    s, d = parse_filename(
-        "history_float_2024-01-31T23:00:00Z_2024-01-31T23:59:59Z_3000_raw.csv.zip"
-    )
-    assert s == "metric"
-    assert d["compression"] == "zip"
-    assert d["ext"] == "csv"
-
-    s, d = parse_filename(
-        "history_float_2024-01-31T23:00:00Z_2024-01-31T23:59:59Z_3000_raw.csv"
-    )
-    assert s == "metric"
-    assert d["ext"] == "csv"
-
-    # ok
-    data = {
-        "datatype": "float",
-        "dataflag": "raw",
-        "start": "2022-12-26T00:00:00",
-        "stop": "2022-12-26T01:00:00",
-        "count": 700,
-        "size": "8.1G",
-    }
-    ok, new_name = create_filename(data, "kenny.csv", "log")
-    assert not ok  # no compression!
-    print(new_name)
-
-    ok, new_name = create_filename(data, "kenny.pkl.zst", "log")
-    assert ok
-    print(new_name)
-
-    data = {
-        "datatype": "float",
-        "dataflag": "raw and juicy",
-        "start": "1737645608",
-        "stop": "1737645608.6",
-        "count": 700,
-        "size": "",
-    }
-    ok, new_name = create_filename(data, "kenny.csv", "metric")
-    assert ok
-    print(new_name)
-
-    ok, new_name = create_filename(data, "kenny.pkl.zst", "metric")
-    assert ok
-    print(new_name)
-
-    data = {
-        "datatype": "float",
-        "dataflag": "raw",
-        "start": "1737645608",
-        "stop": "1737645608.6",
-        "count": 700,
-        "size": "12343243",
-    }
-    ok, new_name = create_filename(data, "kenny.pkl.zst", "log")
-    assert ok
-    print(new_name)
-
-    # error
-    data = {
-        "dataflag": "raw",
-        "start": "1737645608",
-        "stop": "1737645608.6",
-        "count": 700,
-    }
-    ok, new_name = create_filename(data, "kenny", "metric")
-    assert not ok
-    print(new_name)
-
-    data = {
-        "datatype": "float",
-        "dataflag": "raw",
-        "start": "1737645608",
-        "stop": "1737645608.6",
-        "count": 700,
-        "size": "12343243",
-    }
-    ok, new_name = create_filename(data, "ke nny.csv.zst", "log")
-    assert ok
-    print(new_name)
-
-    data = {
-        "datatype": "float",
-        "dataflag": "raw",
-        "start": "1737645608",
-        "stop": "17370608.6",
-        "count": 700,
-        "size": "12343243",
-    }
-    ok, new_name = create_filename(data, "ke nny.csv.zst", "log")
-    assert not ok
-    print(new_name)
-
-    data = {
-        "datatype": "float",
-        "dataflag": "raw",
-        "start": "1737645608",
-        "stop": "1737645607",
-        "count": 700,
-        "size": "12343243",
-    }
-    ok, new_name = create_filename(data, "kenny.csv.zst", "log")
-    assert not ok
-    print(new_name)

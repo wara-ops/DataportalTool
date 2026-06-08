@@ -1,0 +1,61 @@
+# GitHub Actions CI for dataportaltools.
+#
+# Runs ruff + pylint once, then the test suite (with the >=90% coverage gate
+# configured in pyproject.toml) against every non-EOL Python version, plus a
+# non-blocking dependency CVE scan (pip-audit).
+
+name: CI
+
+"on":
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up PDM
+        uses: pdm-project/setup-pdm@v4.5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pdm install --dev
+      - name: Ruff lint
+        run: pdm run ruff check
+      - name: Ruff format check
+        run: pdm run ruff format --check
+      - name: Pylint
+        run: pdm run pylint src/dataportaltools
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up PDM
+        uses: pdm-project/setup-pdm@v4.5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: pdm install --dev
+      - name: Run tests (with coverage gate)
+        run: pdm run pytest tests
+
+  audit:
+    # Dependency CVE scan. Non-blocking: surfaces advisories without failing CI.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up PDM
+        uses: pdm-project/setup-pdm@v4.5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pdm install --dev
+      - name: pip-audit (non-blocking)
+        run: pdm run audit
