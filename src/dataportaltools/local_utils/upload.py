@@ -6,6 +6,7 @@ import os
 from typing import Optional, Union
 
 import requests
+import xxhash
 
 from . import utils
 
@@ -280,7 +281,7 @@ class WCIBConnection:
         self, datasetid: int, fname: str, data: dict, dryrun: bool
     ) -> dict:
         """
-        Uploads a data ("log" or "metric") file
+        Uploads a data ("log" or "metric") file as a single atomic upload
 
         Parameters
         ----------
@@ -306,57 +307,58 @@ class WCIBConnection:
         # Raises exception on int error
         data["count"] = int(data["count"])
 
-        req_body = {
+        size = os.path.getsize(fname)
+
+        form = {
             "start": data["start"],
             "stop": data["stop"],
             "count": int(data["count"]),
+            "filename": os.path.basename(fname),
+            "size": size,
         }
 
-        size = data.get("size", "")
-        if size != "":
-            req_body["uncompressedsize"] = size
+        uncompressedsize = data.get("size", "")
+        if uncompressedsize != "":
+            form["uncompressedsize"] = uncompressedsize
 
         dataflag = data.get("flag", "")
         if dataflag != "":
-            req_body["dataflag"] = dataflag
+            form["dataflag"] = dataflag
 
         datatype = data.get("type", "")
         if datatype != "":
-            req_body["datatype"] = datatype
+            form["datatype"] = datatype
 
-        _logger.debug("_upload_data req_body %s", json.dumps(req_body, indent=4))
-
-        headers = {
-            "content-type": "application/json",
-            "Authorization": f"Bearer {self.token_data}",
-        }
-        pth = f"{self.url}/dataset/{datasetid}/files"
+        _logger.debug("_upload_data form %s", json.dumps(form, indent=4))
 
         if not dryrun:
-            response = self._s.post(
-                pth, headers=headers, json=req_body, timeout=self.timeout
-            )
-            response.raise_for_status()
-            j = response.json()
-            _logger.debug("response %s", json.dumps(j, indent=4))
+            # Stream the file through xxhash so we don't load it twice into memory
+            h = xxhash.xxh128()
+            with open(fname, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                    h.update(chunk)
+            idempotency_key = h.hexdigest()
 
-            datafileid = j.get("fileId", -1)
-            if datafileid < 0:
-                raise WCIBError(f"Failed to prepare file structures for {fname}")
-
-            headers = {"Authorization": f"Bearer {self.token_data}"}
-            pth = f"{self.url}/dataset/{datasetid}/files/{datafileid}"
+            headers = {
+                "Authorization": f"Bearer {self.token_data}",
+                "Idempotency-Key": idempotency_key,
+            }
+            pth = f"{self.url}/dataset/{datasetid}/files"
 
             with open(fname, "rb") as data_fh:
                 payload = (("data", (os.path.basename(fname), data_fh)),)
-                response = self._s.put(
-                    pth, headers=headers, files=payload, timeout=self.timeout
+                response = self._s.post(
+                    pth,
+                    headers=headers,
+                    data=form,
+                    files=payload,
+                    timeout=self.timeout,
                 )
             response.raise_for_status()
             j = response.json()
-            _logger.debug("json response %s", json.dumps(j, indent=4))
+            _logger.debug("response %s", json.dumps(j, indent=4))
         else:
-            _logger.info("_upload_data %s", json.dumps(req_body, indent=4))
+            _logger.info("_upload_data %s", json.dumps(form, indent=4))
 
             j = {}
 

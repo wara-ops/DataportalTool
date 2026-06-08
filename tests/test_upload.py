@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import requests
+import xxhash
 
 from dataportaltools.local_utils import upload
 from dataportaltools.local_utils.upload import WCIBConnection, WCIBError
@@ -132,17 +133,28 @@ def test_upload_data_ok(tmp_path):
     f.write_bytes(b"data")
 
     post_resp = MagicMock()
-    post_resp.json.return_value = {"fileId": 5}
+    post_resp.json.return_value = {"fileId": 5, "status": "READY"}
     post_resp.raise_for_status.return_value = None
     sess.post.return_value = post_resp
 
-    put_resp = MagicMock()
-    put_resp.json.return_value = {"path": "p"}
-    put_resp.raise_for_status.return_value = None
-    sess.put.return_value = put_resp
-
     result = wc._upload_data(1, str(f), _filedata(), False)
-    assert result == {"path": "p"}
+    assert result == {"fileId": 5, "status": "READY"}
+
+    # Single atomic POST, no second PUT.
+    sess.post.assert_called_once()
+    sess.put.assert_not_called()
+
+    _, kwargs = sess.post.call_args
+    form = kwargs["data"]
+    assert form["size"] == f.stat().st_size
+    assert form["filename"] == "file.bin"
+    assert form["start"] == "s"
+    assert form["stop"] == "e"
+    assert form["count"] == 3
+
+    headers = kwargs["headers"]
+    expected_key = xxhash.xxh128(f.read_bytes()).hexdigest()
+    assert headers["Idempotency-Key"] == expected_key
 
 
 def test_upload_data_dryrun(tmp_path):
@@ -153,15 +165,14 @@ def test_upload_data_dryrun(tmp_path):
     sess.post.assert_not_called()
 
 
-def test_upload_data_negative_fileid_raises(tmp_path):
+def test_upload_data_http_error_propagates(tmp_path):
     wc, sess = _connected()
     f = tmp_path / "file.bin"
     f.write_bytes(b"data")
     post_resp = MagicMock()
-    post_resp.json.return_value = {"fileId": -1}
-    post_resp.raise_for_status.return_value = None
+    post_resp.raise_for_status.side_effect = requests.exceptions.HTTPError("boom")
     sess.post.return_value = post_resp
-    with pytest.raises(WCIBError):
+    with pytest.raises(requests.exceptions.HTTPError):
         wc._upload_data(1, str(f), {"count": 1, "start": "s", "stop": "e"}, False)
 
 
