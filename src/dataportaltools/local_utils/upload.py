@@ -9,6 +9,7 @@ import requests
 import xxhash
 
 from . import utils
+from . import wcib_format
 
 # Set default level
 logging.basicConfig(level=logging.WARN)
@@ -176,13 +177,142 @@ class WCIBConnection:
             _logger.error("%s", str(err))
             return 1
 
-        fmt = "{:>9} | {:<40}"
-        print(fmt.format("DatasetID", "ContainerName"))
-        print("-" * 10 + "+" + "-" * 98)
-        print(fmt.format(j.get("DatasetID", "-"), j.get("ContainerName", "-")))
+        wcib_format.print_created_dataset(j)
 
         return 0
 
+    # parameters mirror the annotation request fields
+    # pylint: disable=too-many-arguments,too-many-positional-arguments
+    def set_file_metadata(
+        self,
+        datasetid: int,
+        fileid: int,
+        tags: Optional[list] = None,
+        points_of_interest: Optional[list] = None,
+        dryrun: bool = False,
+    ) -> dict:
+        """
+        Sets (replaces) the user annotations on a single file.
+
+        Updates ONLY the user-supplied annotations (tags and points of
+        interest); it never touches file content. Works on any file row by
+        FileID -- a datafile or an extrafile alike. The server rejects
+        annotation on a non-READY file (HTTP 409).
+
+        Parameters
+        ----------
+        datasetid : int
+            Dataset ID
+        fileid : int
+            File ID (FileID) of the file to annotate
+        tags : list[str] | None
+            List of tag strings. Pass ``None`` to leave tags untouched; pass
+            an empty list (``[]``) to clear all tags.
+        points_of_interest : list[dict] | None
+            List of points-of-interest time ranges, each a dict of the form
+            ``{"start": ..., "stop": ..., "text": ...}``. Pass ``None`` to
+            leave them untouched; pass an empty list to clear them. Items are
+            passed through as-is (the server validates them).
+        dryrun : bool
+            Indicate dryrun or not
+
+        Returns
+        -------
+        dict
+            API response as JSON, or an empty dict when there is nothing to
+            do (neither field provided) or on a dryrun.
+
+        Raises
+        ------
+        requests.exceptions.HTTPError
+            If the server returns an error status.
+        """
+        # Use ``is not None`` so an empty list (clear semantics) is honoured.
+        body = {}
+        if tags is not None:
+            body["tags"] = tags
+        if points_of_interest is not None:
+            body["pointsOfInterest"] = points_of_interest
+
+        if not body:
+            _logger.debug(
+                "set_file_metadata, datasetid %d, fileid %d, nothing to do",
+                datasetid,
+                fileid,
+            )
+            return {}
+
+        headers = {"Authorization": f"Bearer {self.token_data}"}
+        pth = f"{self.url}/dataset/{datasetid}/files/{fileid}"
+
+        if dryrun:
+            _logger.info(
+                "set_file_metadata, datasetid %d, fileid %d, body %s",
+                datasetid,
+                fileid,
+                body,
+            )
+            return {}
+
+        response = self._s.put(pth, headers=headers, json=body, timeout=self.timeout)
+        response.raise_for_status()
+        return response.json()
+
+    @staticmethod
+    def _file_size_and_key(fname: str) -> tuple[int, str]:
+        """
+        Returns the file's byte size and an idempotency key.
+
+        The key is the xxh128 hex digest of the file contents, streamed in
+        1 MiB chunks so the file is never loaded fully into memory. The size
+        is the on-disk byte count. Both are sent with atomic uploads so the
+        server can validate the payload and de-duplicate retries.
+        """
+        size = os.path.getsize(fname)
+        h = xxhash.xxh128()
+        with open(fname, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        return size, h.hexdigest()
+
+    # parameters mirror set_file_metadata plus the upload response
+    # pylint: disable=too-many-arguments,too-many-positional-arguments
+    def _annotate_uploaded(
+        self,
+        datasetid: int,
+        resp_json: dict,
+        tags: Optional[list],
+        points_of_interest: Optional[list],
+        dryrun: bool,
+    ) -> None:
+        """
+        Annotates a freshly-uploaded file from its upload response.
+
+        No-op when no annotations were requested or on a dryrun. Skips (with a
+        warning) if the upload response does not report the file as READY,
+        since the server rejects annotation of a non-READY file. Raises on a
+        failed annotation request so the caller can record the partial state.
+        """
+        if (tags is None and points_of_interest is None) or dryrun:
+            return
+
+        fileid = resp_json.get("fileId", None)
+        if fileid is None:
+            return
+
+        status = resp_json.get("status")
+        if status is not None and status != "READY":
+            _logger.warning(
+                "Skipping annotation of file %s: not READY (status %s)",
+                fileid,
+                status,
+            )
+            return
+
+        self.set_file_metadata(datasetid, fileid, tags, points_of_interest, dryrun)
+
+    # locals mirror the upload request fields plus the deterministic file handle
+    # pylint: disable=too-many-locals
     def _upload_extra(
         self, datasetid: int, fname: str, prefix: str, dryrun: bool
     ) -> dict:
@@ -256,6 +386,12 @@ class WCIBConnection:
         j = {}
 
         if not dryrun:
+            # Atomic streaming upload: send the exact byte size up front and an
+            # Idempotency-Key (xxh128 hex of the bytes) so retries de-dup.
+            size, idempotency_key = self._file_size_and_key(fname)
+            body["size"] = size
+            headers["Idempotency-Key"] = idempotency_key
+
             with open(fname, "rb") as data_fh:
                 payload = (("data", data_fh),)
                 response = self._s.put(
@@ -307,7 +443,7 @@ class WCIBConnection:
         # Raises exception on int error
         data["count"] = int(data["count"])
 
-        size = os.path.getsize(fname)
+        size, idempotency_key = self._file_size_and_key(fname)
 
         form = {
             "start": data["start"],
@@ -332,13 +468,6 @@ class WCIBConnection:
         _logger.debug("_upload_data form %s", json.dumps(form, indent=4))
 
         if not dryrun:
-            # Stream the file through xxhash so we don't load it twice into memory
-            h = xxhash.xxh128()
-            with open(fname, "rb") as fh:
-                for chunk in iter(lambda: fh.read(1024 * 1024), b""):
-                    h.update(chunk)
-            idempotency_key = h.hexdigest()
-
             headers = {
                 "Authorization": f"Bearer {self.token_data}",
                 "Idempotency-Key": idempotency_key,
@@ -364,8 +493,16 @@ class WCIBConnection:
 
         return j
 
+    # parameters mirror the upload request fields plus optional annotations
+    # pylint: disable=too-many-arguments,too-many-positional-arguments
     def _upload_extra_files(
-        self, datasetid: int, all_files: list[str], prefix: str, dryrun: bool
+        self,
+        datasetid: int,
+        all_files: list[str],
+        prefix: str,
+        dryrun: bool,
+        tags: Optional[list] = None,
+        points_of_interest: Optional[list] = None,
     ) -> tuple[int, dict]:
         """
         Uploads an extra file
@@ -380,6 +517,10 @@ class WCIBConnection:
             Dest path and name of uploaded file, e.g. "subdir", "subdir/" and "subdir/newname"
         dryrun : bool
             Indicate dryrun or not
+        tags : list[str] | None
+            Tags applied to every freshly-uploaded file in the batch
+        points_of_interest : list[dict] | None
+            Points-of-interest applied to every freshly-uploaded file in the batch
 
         Returns
         -------
@@ -405,13 +546,32 @@ class WCIBConnection:
             except Exception as e:
                 _logger.error("Upload of %s failed, %s", f, str(e))
                 ret = 1
+                continue
+
+            # Annotate the freshly-uploaded file. Reported separately so an
+            # annotation failure is not misattributed to the upload.
+            try:
+                self._annotate_uploaded(
+                    datasetid, resp_json, tags, points_of_interest, dryrun
+                )
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                _logger.error("Annotation of %s failed, %s", f, str(e))
+                ret = 1
 
         return ret, resp
 
     # parameters mirror the upload request fields
     # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    # pylint: disable=too-many-branches
     def _upload_data_files(
-        self, datasetid: int, all_files: list[str], data: dict, kind: str, dryrun: bool
+        self,
+        datasetid: int,
+        all_files: list[str],
+        data: dict,
+        kind: str,
+        dryrun: bool,
+        tags: Optional[list] = None,
+        points_of_interest: Optional[list] = None,
     ) -> tuple[int, dict]:
         """
         Uploads an extra file
@@ -428,6 +588,10 @@ class WCIBConnection:
             "log" or "metric"
         dryrun : bool
             Indicate dryrun or not
+        tags : list[str] | None
+            Tags applied to every freshly-uploaded file in the batch
+        points_of_interest : list[dict] | None
+            Points-of-interest applied to every freshly-uploaded file in the batch
 
         Returns
         -------
@@ -498,6 +662,17 @@ class WCIBConnection:
             except Exception as e:
                 _logger.error("Upload of %s failed, %s", fname, str(e))
                 ret = 1
+                continue
+
+            # Annotate the freshly-uploaded file. Reported separately so an
+            # annotation failure is not misattributed to the upload.
+            try:
+                self._annotate_uploaded(
+                    datasetid, resp_json, tags, points_of_interest, dryrun
+                )
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                _logger.error("Annotation of %s failed, %s", fname, str(e))
+                ret = 1
 
         return ret, resp
 
@@ -542,6 +717,8 @@ class WCIBConnection:
         prefix: str,
         kind: str,
         dryrun: bool,
+        tags: Optional[list] = None,
+        points_of_interest: Optional[list] = None,
     ) -> int:
         """
         Uploads a file to a dataset
@@ -568,6 +745,14 @@ class WCIBConnection:
             Either "log" or "metric"
         dryrun : bool
             Indicate dryrun or not
+        tags : list[str] | None
+            Optional tags to apply to every freshly-uploaded file in the
+            batch (datafiles and extrafiles alike). ``None`` leaves tags
+            untouched; an empty list clears them.
+        points_of_interest : list[dict] | None
+            Optional points-of-interest time ranges
+            (``{"start", "stop", "text"}``) to apply to every freshly-uploaded
+            file in the batch. ``None`` leaves them untouched.
 
         Returns
         -------
@@ -590,9 +775,13 @@ class WCIBConnection:
 
         # Extrafiles are uploaded "as is"
         if prefix != "":
-            ok, resp = self._upload_extra_files(datasetid, all_files, prefix, dryrun)
+            ok, resp = self._upload_extra_files(
+                datasetid, all_files, prefix, dryrun, tags, points_of_interest
+            )
         else:
-            ok, resp = self._upload_data_files(datasetid, all_files, data, kind, dryrun)
+            ok, resp = self._upload_data_files(
+                datasetid, all_files, data, kind, dryrun, tags, points_of_interest
+            )
 
         fmt = "{:<50} | {:<50}"
         print(fmt.format("Source", "Dest"))
@@ -704,23 +893,7 @@ class WCIBConnection:
 
         datasets = j.get("Datasets", [])
 
-        fmt = "{:>9} | {:>40} | {:>30} | {:>10} | {:>10}"
-        print(
-            fmt.format(
-                "DatasetID", "DatasetName", "CreateDate", "Category", "Organization"
-            )
-        )
-        print("+".join("-" * n for n in (10, 42, 32, 12, 15)))
-        for entry in datasets:
-            print(
-                fmt.format(
-                    entry["DatasetID"],
-                    entry["DatasetName"],
-                    entry["CreateDate"],
-                    entry["Category"],
-                    entry["Organization"],
-                )
-            )
+        wcib_format.print_datasets(datasets)
 
         return 0
 
@@ -742,30 +915,6 @@ class WCIBConnection:
         Raises
         ------
         """
-        # headers = {"Authorization": f"Bearer {self.token_data}"}
-
-        # files = []
-
-        # pth = f"{self.url}/dataset/{datasetid}/files?limit=0&extrafiles=false"
-
-        # j = {}
-
-        # try:
-        #    if dryrun:
-        #        _logger.info("List files in dataset %d", datasetid)
-        #    else:
-        #        response = self._s.get(pth, headers=headers, timeout=self.timeout)
-        #        response.raise_for_status()
-        #        j = response.json()
-        # except requests.exceptions.HTTPError as err:
-        #    _logger.error("list files failed, %s", str(err))
-        #    return 1
-
-        # _logger.debug(json.dumps(j, indent=3))
-
-        # _files = j.get("data", [])
-        # files.extend(_files)
-
         data_files = self._list_files(datasetid, False, dryrun)
         if data_files is None:
             return 1
@@ -774,74 +923,6 @@ class WCIBConnection:
         if extra_files is None:
             return 1
 
-        # Example API JSON shape for the files listing:
-        # ...
-        #  {
-        #  "FileID": 59,
-        #  "MFileName": "testupload1731423091_float_2009-10-10T00:10:18.000_..._raw.zstd",
-        #  "DatasetID": 3,
-        #  "OriginName": "Ericsson",
-        #  "StartDate": "2009-10-10T00:10:18.000Z",
-        #  "StopDate": "2009-10-10T00:10:19.000Z",
-        #  "FileSize": 2097152,
-        #  "MetricEntries": 9,
-        #  "MetricType": "float",
-        #  "Uuid": "c666a272-b2d6-428a-bc3a-9a7675c40914",
-        #  "ExtraFile": 0
-        #  },
-        # {
-        #     "FileID": 3,
-        #     "MFileName": "apa.csv",
-        #     "DatasetID": 1,
-        #     "OriginName": "Ericsson",
-        #     "StartDate": null,
-        #     "StopDate": null,
-        #     "FileSize": 1442,
-        #     "MetricEntries": null,
-        #     "MetricType": null,
-        #     "Uuid": "0209882d-6f3b-4275-b92e-ff42baea7e36",
-        #     "ExtraFile": 1
-        #     },
-        # ...
-
-        num_files = 0
-        total_size = 0
-        fmt = "{:>6} | {:>30} | {:>30} | {:>10} | {:>12} | {}"
-        separator = "+".join("-" * n for n in (7, 32, 32, 12, 14, 23))
-        print(
-            fmt.format(
-                "FileID", "StartDate", "StopDate", "Entries", "FileSize", "MFileName"
-            )
-        )
-        print(separator)
-
-        for files in [data_files, extra_files]:
-            if not isinstance(files, list):
-                continue
-
-            _num_files = 0
-
-            for entry in files:
-                print(
-                    fmt.format(
-                        entry["FileID"] or "n/a",
-                        entry["StartDate"] or "n/a",
-                        entry["StopDate"] or "n/a",
-                        entry["MetricEntries"] or "n/a",
-                        entry["FileSize"] or "n/a",
-                        entry["MFileName"],
-                    )
-                )
-
-                _num_files += 1
-                total_size += entry["FileSize"]
-
-            if _num_files > 0:
-                print(separator)
-
-            num_files += _num_files
-
-        if num_files > 0:
-            print(fmt.format(num_files, "", "", "", total_size, ""))
+        wcib_format.print_files([data_files, extra_files])
 
         return 0

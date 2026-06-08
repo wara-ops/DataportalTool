@@ -278,6 +278,17 @@ def parse_filename(fname: str) -> tuple[str, dict]:
     return "extra", {}
 
 
+def normalize_timestamp(s: str) -> tuple[bool, str]:
+    """Normalize an ISO-8601 or epoch timestamp string.
+
+    Returns ``(True, normalized)`` on success, or ``(False, "")`` if the input
+    is empty or cannot be parsed. The normalized form is the
+    ``YYYY-MM-DDThh:mm:ss[.uuu]Z`` representation the API expects.
+    """
+    obj, norm = _parse_time(s)
+    return obj is not None, norm
+
+
 def _parse_time(s: str) -> tuple[object, str]:
     """Parse an ISO-8601 or epoch timestamp into a (datetime, normalized) pair.
 

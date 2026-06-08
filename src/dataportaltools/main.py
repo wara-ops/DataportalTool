@@ -12,10 +12,12 @@ try:
     # Normal case: installed/imported as part of the package.
     from .local_utils import config
     from .local_utils import upload as up
+    from .local_utils import utils
 except ImportError:
     # Fallback: running this file directly (``python main.py``).
     from local_utils import config
     from local_utils import upload as up
+    from local_utils import utils
 
 
 _log = logging.getLogger("base")
@@ -104,6 +106,32 @@ _log = logging.getLogger("base")
 @click.option(
     "--force/--no-force", default=False, help="Force action (whan action is 'delete')"
 )
+@click.option(
+    "--tag",
+    "tag",
+    multiple=True,
+    metavar="<tag>",
+    help="Tag to attach to uploaded/annotated file(s). May be repeated.",
+)
+@click.option(
+    "--poi",
+    "poi",
+    multiple=True,
+    metavar="<start,stop,text>",
+    help="Point-of-interest time range as 'start,stop,text'. start/stop are "
+    "timestamps (ISO-8601 or epoch, no commas); the text may contain commas. "
+    "May be repeated. POIs are only allowed when uploading a single file or "
+    "with --setmeta.",
+)
+@click.option(
+    "--setmeta",
+    default=None,
+    type=int,
+    metavar="<fileid>",
+    help="Annotate an existing file (by FileID) with --tag/--poi without "
+    "re-uploading. Requires --upload <datasetid> or --listfiles <datasetid> "
+    "for the dataset id.",
+)
 @click.pass_context
 def main(
     ctx,
@@ -126,6 +154,9 @@ def main(
     size,
     kind,
     force,
+    tag,
+    poi,
+    setmeta,
 ) -> None:
     # This is a Click command exposing the full CLI surface, so the large
     # number of options/branches maps directly onto the documented commands.
@@ -156,6 +187,62 @@ def main(
 
     ret = 0
 
+    # Parse annotation flags. ``None`` means "not provided" so existing
+    # behaviour is unchanged when no annotation flags are passed; an empty
+    # list (impossible via multiple=True) would mean "clear".
+    tags = list(tag) if tag else None
+
+    pois = None
+    if poi:
+        pois = []
+        for s in poi:
+            # text may contain commas, so split on the first two only
+            parts = s.split(",", 2)
+            if len(parts) != 3:
+                raise click.UsageError(
+                    f"Invalid --poi '{s}', expected 'start,stop,text'"
+                )
+            # Normalize start/stop the same way upload timestamps are handled.
+            start_ok, start_norm = utils.normalize_timestamp(parts[0])
+            stop_ok, stop_norm = utils.normalize_timestamp(parts[1])
+            if not start_ok or not stop_ok:
+                raise click.UsageError(
+                    f"Invalid --poi '{s}': start/stop must be valid timestamps "
+                    "(ISO-8601 or epoch)"
+                )
+            pois.append({"start": start_norm, "stop": stop_norm, "text": parts[2]})
+
+    # POIs are time ranges for one file; applying the same range to a whole
+    # glob/batch is almost never intended, so reject it for multi-file uploads.
+    if pois is not None and upload is not None and setmeta is None:
+        matched = [f for f in utils.get_all_src_files(list(src)) if os.path.isfile(f)]
+        if len(matched) > 1:
+            raise click.UsageError(
+                "--poi cannot be applied to a multi-file upload "
+                f"({len(matched)} files matched); upload a single file or use "
+                "--setmeta <fileid> to annotate individual files"
+            )
+
+    # Annotate an existing file without re-uploading.
+    if setmeta is not None:
+        if upload is None and listfiles is None:
+            raise click.UsageError(
+                "--setmeta requires --upload <datasetid> or "
+                "--listfiles <datasetid> for the dataset id"
+            )
+        if tags is None and pois is None:
+            print("Nothing to do: --setmeta needs --tag and/or --poi")
+            ctx.exit(0)
+        try:
+            datasetid = int(upload) if upload is not None else int(listfiles)
+            wc.set_file_metadata(datasetid, setmeta, tags, pois, dryrun)
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            # CLI boundary: surface any operation failure as a non-zero exit.
+            print(f"Failed to execute: {e}")
+            ret = 1
+
+        ctx.exit(ret)
+
     if createdataset is not None:
         try:
             ret = wc.create_dataset(createdataset, user, dryrun)
@@ -178,7 +265,16 @@ def main(
                     "count": count,
                     "size": size,
                 }
-                ret = wc.upload(datasetid, list(src), data, prefix, kind, dryrun)
+                ret = wc.upload(
+                    datasetid,
+                    list(src),
+                    data,
+                    prefix,
+                    kind,
+                    dryrun,
+                    tags=tags,
+                    points_of_interest=pois,
+                )
             else:
                 ret = 1
         except Exception as e:  # pylint: disable=broad-exception-caught

@@ -4,4 +4,5 @@ __all__ = [
     "config",
     "upload",
     "utils",
+    "wcib_format",
 ]

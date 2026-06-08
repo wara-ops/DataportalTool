@@ -488,3 +488,345 @@ def test_internal_list_files_http_error():
     resp.raise_for_status.side_effect = requests.exceptions.HTTPError("boom")
     sess.get.return_value = resp
     assert wc._list_files(1, False, False) is None
+
+
+# --------------------------------------------------------------------------- #
+# set_file_metadata
+# --------------------------------------------------------------------------- #
+def _put_ok(sess, payload=None):
+    """Configure sess.put to return a successful response with given json."""
+    put_resp = MagicMock()
+    put_resp.json.return_value = {} if payload is None else payload
+    put_resp.raise_for_status.return_value = None
+    sess.put.return_value = put_resp
+    return put_resp
+
+
+def test_set_file_metadata_tags_only():
+    wc, sess = _connected()
+    _put_ok(sess, {"ok": True})
+    result = wc.set_file_metadata(1, 5, tags=["a", "b"])
+    assert result == {"ok": True}
+    sess.put.assert_called_once()
+    args, kwargs = sess.put.call_args
+    assert args[0] == "http://x/v1/dataset/1/files/5"
+    body = kwargs["json"]
+    assert body["tags"] == ["a", "b"]
+    assert "pointsOfInterest" not in body
+    assert kwargs["headers"]["Authorization"] == "Bearer tok"
+
+
+def test_set_file_metadata_poi_only():
+    wc, sess = _connected()
+    _put_ok(sess)
+    poi = [{"start": "s", "stop": "e", "text": "note"}]
+    wc.set_file_metadata(1, 5, points_of_interest=poi)
+    sess.put.assert_called_once()
+    _, kwargs = sess.put.call_args
+    body = kwargs["json"]
+    assert body["pointsOfInterest"] == poi
+    assert "tags" not in body
+
+
+def test_set_file_metadata_both():
+    wc, sess = _connected()
+    _put_ok(sess)
+    poi = [{"start": "s", "stop": "e", "text": "note"}]
+    wc.set_file_metadata(1, 5, tags=["t"], points_of_interest=poi)
+    _, kwargs = sess.put.call_args
+    body = kwargs["json"]
+    assert body["tags"] == ["t"]
+    assert body["pointsOfInterest"] == poi
+
+
+def test_set_file_metadata_empty_tags_clears():
+    wc, sess = _connected()
+    _put_ok(sess)
+    # Empty list must still be sent (clear semantics), not skipped.
+    wc.set_file_metadata(1, 5, tags=[])
+    sess.put.assert_called_once()
+    _, kwargs = sess.put.call_args
+    assert "tags" in kwargs["json"]
+    assert kwargs["json"]["tags"] == []
+
+
+def test_set_file_metadata_neither_noop():
+    wc, sess = _connected()
+    assert wc.set_file_metadata(1, 5) == {}
+    sess.put.assert_not_called()
+
+
+def test_set_file_metadata_dryrun():
+    wc, sess = _connected()
+    assert wc.set_file_metadata(1, 5, tags=["t"], dryrun=True) == {}
+    sess.put.assert_not_called()
+
+
+def test_set_file_metadata_http_error_propagates():
+    wc, sess = _connected()
+    put_resp = MagicMock()
+    put_resp.raise_for_status.side_effect = requests.exceptions.HTTPError("boom")
+    sess.put.return_value = put_resp
+    with pytest.raises(requests.exceptions.HTTPError):
+        wc.set_file_metadata(1, 5, tags=["t"])
+
+
+# --------------------------------------------------------------------------- #
+# upload threads annotations (datafile + extrafile)
+# --------------------------------------------------------------------------- #
+def test_upload_datafile_threads_annotations(tmp_path, mocker):
+    wc, sess = _connected()
+    f = tmp_path / "file.csv"
+    f.write_bytes(b"data")
+
+    mocker.patch.object(upload.utils, "get_all_src_files", return_value=[str(f)])
+    mocker.patch.object(
+        upload.utils, "create_filename", return_value=(True, "long_name")
+    )
+    mocker.patch.object(
+        upload.utils, "parse_filename", return_value=("metric", _filedata())
+    )
+    # data upload POST -> READY datafile with fileId 5
+    mocker.patch.object(
+        wc, "_upload_data", return_value={"fileId": 5, "status": "READY", "path": "p"}
+    )
+    # annotation PUT returns {}
+    _put_ok(sess, {})
+
+    poi = [{"start": "s", "stop": "e", "text": "n"}]
+    ret = wc.upload(
+        1,
+        [str(f)],
+        _filedata(),
+        "",
+        "metric",
+        False,
+        tags=["x"],
+        points_of_interest=poi,
+    )
+    assert ret == 0
+
+    # The annotation PUT must hit /files/5 with the tags + poi.
+    sess.put.assert_called_once()
+    args, kwargs = sess.put.call_args
+    assert args[0] == "http://x/v1/dataset/1/files/5"
+    assert kwargs["json"]["tags"] == ["x"]
+    assert kwargs["json"]["pointsOfInterest"] == poi
+
+
+def test_upload_extrafile_threads_annotations(tmp_path, mocker):
+    wc, sess = _connected()
+    f = tmp_path / "extra.bin"
+    f.write_bytes(b"data")
+
+    mocker.patch.object(upload.utils, "get_all_src_files", return_value=[str(f)])
+    # extra upload PUT -> READY extrafile with fileId 7
+    mocker.patch.object(
+        wc,
+        "_upload_extra",
+        return_value={
+            "fileId": 7,
+            "status": "READY",
+            "path": "p",
+            "extraFile": True,
+        },
+    )
+    # annotation PUT returns {}
+    _put_ok(sess, {})
+
+    ret = wc.upload(1, [str(f)], {}, "metadata", "", False, tags=["x"])
+    assert ret == 0
+
+    # THIS IS THE EXTRAFILE-WORKS VERIFICATION: annotation PUT to /files/7.
+    sess.put.assert_called_once()
+    args, kwargs = sess.put.call_args
+    assert args[0] == "http://x/v1/dataset/1/files/7"
+    assert kwargs["json"]["tags"] == ["x"]
+    assert "pointsOfInterest" not in kwargs["json"]
+
+
+def test_upload_without_annotations_no_setmeta(tmp_path, mocker):
+    wc, _ = _connected()
+    f = tmp_path / "file.csv"
+    f.write_bytes(b"data")
+
+    mocker.patch.object(upload.utils, "get_all_src_files", return_value=[str(f)])
+    mocker.patch.object(
+        upload.utils, "create_filename", return_value=(True, "long_name")
+    )
+    mocker.patch.object(
+        upload.utils, "parse_filename", return_value=("metric", _filedata())
+    )
+    mocker.patch.object(
+        wc, "_upload_data", return_value={"fileId": 5, "status": "READY", "path": "p"}
+    )
+    spy = mocker.patch.object(wc, "set_file_metadata")
+
+    ret = wc.upload(1, [str(f)], _filedata(), "", "metric", False)
+    assert ret == 0
+    # Existing behaviour preserved: no annotation when no flags given.
+    spy.assert_not_called()
+
+
+# --------------------------------------------------------------------------- #
+# extrafile end-to-end smoke: upload() entrypoint drives the real
+# _upload_extra (multipart + Idempotency-Key) AND the annotation PUT
+# --------------------------------------------------------------------------- #
+def test_upload_extrafile_end_to_end_with_annotation(tmp_path, mocker):
+    wc, sess = _connected()
+    f = tmp_path / "extra.bin"
+    f.write_bytes(b"payload")
+
+    mocker.patch.object(upload.utils, "get_all_src_files", return_value=[str(f)])
+
+    calls = []
+
+    def _put(pth, **kwargs):
+        calls.append((pth, kwargs))
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        if pth.endswith("/extrafiles"):
+            resp.json.return_value = {
+                "fileId": 9,
+                "status": "READY",
+                "path": "metadata/extra.bin",
+                "extraFile": True,
+            }
+        else:
+            resp.json.return_value = {}
+        return resp
+
+    sess.put.side_effect = _put
+
+    ret = wc.upload(1, [str(f)], {}, "metadata", "", False, tags=["x"])
+    assert ret == 0
+
+    # First call: the extrafiles upload (multipart data + Idempotency-Key).
+    upload_pth, upload_kwargs = calls[0]
+    assert upload_pth == "http://x/v1/dataset/1/extrafiles"
+    body = upload_kwargs["data"]
+    assert body["filename"] == "extra.bin"
+    assert body["prefix"] == "metadata"
+    assert body["size"] == f.stat().st_size
+    assert "files" in upload_kwargs
+    expected_key = xxhash.xxh128(f.read_bytes()).hexdigest()
+    assert upload_kwargs["headers"]["Idempotency-Key"] == expected_key
+
+    # Second call: the annotation PUT to /files/9 with tags.
+    anno_pth, anno_kwargs = calls[1]
+    assert anno_pth == "http://x/v1/dataset/1/files/9"
+    assert anno_kwargs["json"]["tags"] == ["x"]
+
+
+# --------------------------------------------------------------------------- #
+# _annotate_uploaded
+# --------------------------------------------------------------------------- #
+def test_annotate_uploaded_noop_no_annotations():
+    wc, sess = _connected()
+    wc._annotate_uploaded(1, {"fileId": 7, "status": "READY"}, None, None, False)
+    sess.put.assert_not_called()
+
+
+def test_annotate_uploaded_noop_dryrun():
+    wc, sess = _connected()
+    wc._annotate_uploaded(1, {"fileId": 7, "status": "READY"}, ["a"], None, True)
+    sess.put.assert_not_called()
+
+
+def test_annotate_uploaded_noop_no_fileid():
+    wc, sess = _connected()
+    wc._annotate_uploaded(1, {"status": "READY"}, ["a"], None, False)
+    sess.put.assert_not_called()
+
+
+def test_annotate_uploaded_noop_not_ready():
+    wc, sess = _connected()
+    wc._annotate_uploaded(1, {"fileId": 7, "status": "PENDING"}, ["a"], None, False)
+    sess.put.assert_not_called()
+
+
+def test_annotate_uploaded_happy_ready():
+    wc, sess = _connected()
+    _put_ok(sess, {})
+    wc._annotate_uploaded(1, {"fileId": 7, "status": "READY"}, ["a"], None, False)
+    sess.put.assert_called_once()
+    args, kwargs = sess.put.call_args
+    assert args[0] == "http://x/v1/dataset/1/files/7"
+    assert kwargs["json"]["tags"] == ["a"]
+
+
+def test_annotate_uploaded_status_missing_still_annotates():
+    wc, sess = _connected()
+    _put_ok(sess, {})
+    wc._annotate_uploaded(1, {"fileId": 7}, ["a"], None, False)
+    sess.put.assert_called_once()
+    args, _ = sess.put.call_args
+    assert args[0] == "http://x/v1/dataset/1/files/7"
+
+
+def test_annotate_uploaded_http_error_propagates():
+    wc, sess = _connected()
+    put_resp = MagicMock()
+    put_resp.raise_for_status.side_effect = requests.exceptions.HTTPError("boom")
+    sess.put.return_value = put_resp
+    with pytest.raises(requests.exceptions.HTTPError):
+        wc._annotate_uploaded(1, {"fileId": 7, "status": "READY"}, ["a"], None, False)
+
+
+# --------------------------------------------------------------------------- #
+# annotation-failure path: upload succeeds but annotation fails -> ret==1 but
+# the upload is still recorded in resp.
+# --------------------------------------------------------------------------- #
+def test_upload_data_files_annotation_failure_records_upload(tmp_path, mocker):
+    wc, sess = _connected()
+    f = tmp_path / "file.csv"
+    f.write_bytes(b"data")
+
+    mocker.patch.object(
+        upload.utils, "create_filename", return_value=(True, "long_name")
+    )
+    mocker.patch.object(
+        upload.utils, "parse_filename", return_value=("metric", _filedata())
+    )
+    # Upload succeeds and returns a READY datafile with a path.
+    mocker.patch.object(
+        wc,
+        "_upload_data",
+        return_value={"fileId": 5, "status": "READY", "path": "p"},
+    )
+    # Annotation PUT fails.
+    put_resp = MagicMock()
+    put_resp.raise_for_status.side_effect = requests.exceptions.HTTPError("boom")
+    sess.put.return_value = put_resp
+
+    ret, resp = wc._upload_data_files(
+        1, [str(f)], _filedata(), "metric", False, tags=["x"]
+    )
+    # Annotation failed -> ret 1, but the upload itself is still recorded.
+    assert ret == 1
+    assert resp == {str(f): "p"}
+    # The annotation PUT was attempted.
+    sess.put.assert_called_once()
+
+
+def test_upload_extra_files_annotation_failure_records_upload(tmp_path, mocker):
+    wc, sess = _connected()
+    f = tmp_path / "extra.bin"
+    f.write_bytes(b"data")
+
+    # Upload succeeds and returns a READY extrafile with a path.
+    mocker.patch.object(
+        wc,
+        "_upload_extra",
+        return_value={"fileId": 9, "status": "READY", "path": "p"},
+    )
+    # Annotation PUT fails.
+    put_resp = MagicMock()
+    put_resp.raise_for_status.side_effect = requests.exceptions.HTTPError("boom")
+    sess.put.return_value = put_resp
+
+    ret, resp = wc._upload_extra_files(1, [str(f)], "dir", False, tags=["x"])
+    # Annotation failed -> ret 1, but the upload itself is still recorded.
+    assert ret == 1
+    assert resp == {str(f): "p"}
+    sess.put.assert_called_once()
