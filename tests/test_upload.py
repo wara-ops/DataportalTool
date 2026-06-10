@@ -183,10 +183,10 @@ def test_upload_extra_ok(tmp_path):
     wc, sess = _connected()
     f = tmp_path / "file.bin"
     f.write_bytes(b"data")
-    put_resp = MagicMock()
-    put_resp.json.return_value = {"path": "somepath"}
-    put_resp.raise_for_status.return_value = None
-    sess.put.return_value = put_resp
+    post_resp = MagicMock()
+    post_resp.json.return_value = {"path": "somepath"}
+    post_resp.raise_for_status.return_value = None
+    sess.post.return_value = post_resp
     result = wc._upload_extra(1, str(f), "dir", False)
     assert result == {"path": "somepath"}
 
@@ -195,10 +195,10 @@ def test_upload_extra_empty_prefix(tmp_path):
     wc, sess = _connected()
     f = tmp_path / "file.bin"
     f.write_bytes(b"data")
-    put_resp = MagicMock()
-    put_resp.json.return_value = {"path": "p"}
-    put_resp.raise_for_status.return_value = None
-    sess.put.return_value = put_resp
+    post_resp = MagicMock()
+    post_resp.json.return_value = {"path": "p"}
+    post_resp.raise_for_status.return_value = None
+    sess.post.return_value = post_resp
     result = wc._upload_extra(1, str(f), "", False)
     assert result == {"path": "p"}
 
@@ -207,10 +207,10 @@ def test_upload_extra_two_part_prefix(tmp_path):
     wc, sess = _connected()
     f = tmp_path / "file.bin"
     f.write_bytes(b"data")
-    put_resp = MagicMock()
-    put_resp.json.return_value = {"path": "p"}
-    put_resp.raise_for_status.return_value = None
-    sess.put.return_value = put_resp
+    post_resp = MagicMock()
+    post_resp.json.return_value = {"path": "p"}
+    post_resp.raise_for_status.return_value = None
+    sess.post.return_value = post_resp
     result = wc._upload_extra(1, str(f), "dir/newname", False)
     assert result == {"path": "p"}
 
@@ -679,30 +679,36 @@ def test_upload_extrafile_end_to_end_with_annotation(tmp_path, mocker):
 
     mocker.patch.object(upload.utils, "get_all_src_files", return_value=[str(f)])
 
-    calls = []
+    post_calls = []
+    put_calls = []
 
-    def _put(pth, **kwargs):
-        calls.append((pth, kwargs))
+    def _post(pth, **kwargs):
+        post_calls.append((pth, kwargs))
         resp = MagicMock()
         resp.raise_for_status.return_value = None
-        if pth.endswith("/extrafiles"):
-            resp.json.return_value = {
-                "fileId": 9,
-                "status": "READY",
-                "path": "metadata/extra.bin",
-                "extraFile": True,
-            }
-        else:
-            resp.json.return_value = {}
+        resp.json.return_value = {
+            "fileId": 9,
+            "status": "READY",
+            "path": "metadata/extra.bin",
+            "extraFile": True,
+        }
         return resp
 
+    def _put(pth, **kwargs):
+        put_calls.append((pth, kwargs))
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = {}
+        return resp
+
+    sess.post.side_effect = _post
     sess.put.side_effect = _put
 
     ret = wc.upload(1, [str(f)], {}, "metadata", "", False, tags=["x"])
     assert ret == 0
 
-    # First call: the extrafiles upload (multipart data + Idempotency-Key).
-    upload_pth, upload_kwargs = calls[0]
+    # Extrafiles upload is a POST (multipart data + Idempotency-Key).
+    upload_pth, upload_kwargs = post_calls[0]
     assert upload_pth == "http://x/v1/dataset/1/extrafiles"
     body = upload_kwargs["data"]
     assert body["filename"] == "extra.bin"
@@ -712,8 +718,8 @@ def test_upload_extrafile_end_to_end_with_annotation(tmp_path, mocker):
     expected_key = xxhash.xxh128(f.read_bytes()).hexdigest()
     assert upload_kwargs["headers"]["Idempotency-Key"] == expected_key
 
-    # Second call: the annotation PUT to /files/9 with tags.
-    anno_pth, anno_kwargs = calls[1]
+    # Annotation is a PUT to /files/9 with tags.
+    anno_pth, anno_kwargs = put_calls[0]
     assert anno_pth == "http://x/v1/dataset/1/files/9"
     assert anno_kwargs["json"]["tags"] == ["x"]
 

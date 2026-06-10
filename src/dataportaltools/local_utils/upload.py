@@ -394,7 +394,7 @@ class WCIBConnection:
 
             with open(fname, "rb") as data_fh:
                 payload = (("data", data_fh),)
-                response = self._s.put(
+                response = self._s.post(
                     pth,
                     headers=headers,
                     data=body,
