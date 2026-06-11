@@ -1,6 +1,6 @@
 [project]
 name = "dataportaltools"
-version = "0.0.1"
+version = "0.1.0"
 description = "Simplifies managing datasets in the WARA-Ops dataportal"
 authors = [
     {name = "Torgny Holmberg", email = "torgny.holmberg@ericsson.com"},
