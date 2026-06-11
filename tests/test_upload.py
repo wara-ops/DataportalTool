@@ -836,3 +836,53 @@ def test_upload_extra_files_annotation_failure_records_upload(tmp_path, mocker):
     assert ret == 1
     assert resp == {str(f): "p"}
     sess.put.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# _error_detail and timestamp normalization
+# --------------------------------------------------------------------------- #
+def test_error_detail_includes_server_body():
+    resp = MagicMock()
+    resp.text = '{"message":"start must match format date-time"}'
+    err = requests.exceptions.HTTPError("400 Client Error: Bad Request")
+    err.response = resp
+    detail = WCIBConnection._error_detail(err)
+    assert "400 Client Error" in detail
+    assert "start must match format date-time" in detail
+
+
+def test_error_detail_plain_exception():
+    assert WCIBConnection._error_detail(ValueError("boom")) == "boom"
+
+
+def test_error_detail_no_response_body():
+    err = requests.exceptions.HTTPError("500 Server Error")
+    err.response = None
+    assert WCIBConnection._error_detail(err) == "500 Server Error"
+
+
+def test_upload_data_normalizes_timestamps(tmp_path):
+    wc, sess = _connected()
+    f = tmp_path / "file.bin"
+    f.write_bytes(b"data")
+
+    post_resp = MagicMock()
+    post_resp.json.return_value = {"fileId": 5, "status": "READY"}
+    post_resp.raise_for_status.return_value = None
+    sess.post.return_value = post_resp
+
+    data = {
+        "count": 3,
+        # filename-style timestamps with no timezone
+        "start": "2024-01-31T21:00:00",
+        "stop": "2024-01-31T21:59:59",
+        "flag": "raw",
+        "type": "float",
+    }
+    wc._upload_data(1, str(f), data, False)
+
+    _, kwargs = sess.post.call_args
+    form = kwargs["data"]
+    # API requires RFC3339 date-time -> normalized with trailing Z
+    assert form["start"] == "2024-01-31T21:00:00Z"
+    assert form["stop"] == "2024-01-31T21:59:59Z"

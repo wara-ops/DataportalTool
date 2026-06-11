@@ -174,7 +174,7 @@ class WCIBConnection:
                 response.raise_for_status()
                 j = response.json()
         except requests.exceptions.HTTPError as err:
-            _logger.error("%s", str(err))
+            _logger.error("%s", self._error_detail(err))
             return 1
 
         wcib_format.print_created_dataset(j)
@@ -274,6 +274,24 @@ class WCIBConnection:
             for chunk in iter(lambda: fh.read(1024 * 1024), b""):
                 h.update(chunk)
         return size, h.hexdigest()
+
+    @staticmethod
+    def _error_detail(err: Exception) -> str:
+        """
+        Render an exception for the user, including any server response body.
+
+        A bare ``requests`` ``HTTPError`` stringifies to just the status line
+        (e.g. "400 Client Error: ..."), hiding the API's explanation. When a
+        response body is available, append it (trimmed) so the real reason --
+        e.g. a field validation error -- is visible.
+        """
+        msg = str(err)
+        response = getattr(err, "response", None)
+        if response is not None:
+            body = (response.text or "").strip()
+            if body:
+                msg = f"{msg} | server said: {body[:1000]}"
+        return msg
 
     # parameters mirror set_file_metadata plus the upload response
     # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -445,9 +463,16 @@ class WCIBConnection:
 
         size, idempotency_key = self._file_size_and_key(fname)
 
+        # The API validates start/stop as RFC3339 date-time (timezone required),
+        # but filenames carry them without a zone, so normalize to the ...Z form.
+        start_ok, start_norm = utils.normalize_timestamp(data["start"])
+        stop_ok, stop_norm = utils.normalize_timestamp(data["stop"])
+        start = start_norm if start_ok else data["start"]
+        stop = stop_norm if stop_ok else data["stop"]
+
         form = {
-            "start": data["start"],
-            "stop": data["stop"],
+            "start": start,
+            "stop": stop,
             "count": int(data["count"]),
             "filename": os.path.basename(fname),
             "size": size,
@@ -544,7 +569,7 @@ class WCIBConnection:
             # pylint: disable=broad-exception-caught
             # per-file failures are logged and skipped so other files still upload
             except Exception as e:
-                _logger.error("Upload of %s failed, %s", f, str(e))
+                _logger.error("Upload of %s failed, %s", f, self._error_detail(e))
                 ret = 1
                 continue
 
@@ -555,7 +580,7 @@ class WCIBConnection:
                     datasetid, resp_json, tags, points_of_interest, dryrun
                 )
             except Exception as e:  # pylint: disable=broad-exception-caught
-                _logger.error("Annotation of %s failed, %s", f, str(e))
+                _logger.error("Annotation of %s failed, %s", f, self._error_detail(e))
                 ret = 1
 
         return ret, resp
@@ -660,7 +685,7 @@ class WCIBConnection:
             # pylint: disable=broad-exception-caught
             # per-file failures are logged and skipped so other files still upload
             except Exception as e:
-                _logger.error("Upload of %s failed, %s", fname, str(e))
+                _logger.error("Upload of %s failed, %s", fname, self._error_detail(e))
                 ret = 1
                 continue
 
@@ -671,7 +696,9 @@ class WCIBConnection:
                     datasetid, resp_json, tags, points_of_interest, dryrun
                 )
             except Exception as e:  # pylint: disable=broad-exception-caught
-                _logger.error("Annotation of %s failed, %s", fname, str(e))
+                _logger.error(
+                    "Annotation of %s failed, %s", fname, self._error_detail(e)
+                )
                 ret = 1
 
         return ret, resp
@@ -697,7 +724,7 @@ class WCIBConnection:
                 response.raise_for_status()
                 j = response.json()
         except requests.exceptions.HTTPError as err:
-            _logger.error("list files failed, %s", str(err))
+            _logger.error("list files failed, %s", self._error_detail(err))
             return None
 
         _logger.debug(json.dumps(j, indent=3))
@@ -846,7 +873,7 @@ class WCIBConnection:
                 response.raise_for_status()
                 j = response.json()
         except requests.exceptions.HTTPError as err:
-            _logger.error("delete failed, %s", str(err))
+            _logger.error("delete failed, %s", self._error_detail(err))
             return 1
 
         _logger.debug("response %s", json.dumps(j, indent=4))
@@ -888,7 +915,7 @@ class WCIBConnection:
                 response.raise_for_status()
                 j = response.json()
         except requests.exceptions.HTTPError as err:
-            _logger.error("list datasets failed, %s", str(err))
+            _logger.error("list datasets failed, %s", self._error_detail(err))
             return 1
 
         datasets = j.get("Datasets", [])
