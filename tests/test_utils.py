@@ -1,8 +1,53 @@
 """Tests for dataportaltools.local_utils.utils."""
 
+import logging
+
 import pytest
 
 from dataportaltools.local_utils import utils
+
+
+@pytest.fixture
+def _restore_logging(monkeypatch):
+    """Save/restore the toolslib logger level and the log-level env var."""
+    monkeypatch.delenv("PORTAL_LOG_LEVEL", raising=False)
+    log = logging.getLogger("toolslib")
+    prev = log.level
+    yield
+    log.setLevel(prev)
+
+
+def test_configure_logging_default_is_warning(_restore_logging):
+    utils.configure_logging(0)
+    assert logging.getLogger("toolslib").level == logging.WARNING
+
+
+def test_configure_logging_verbose_info(_restore_logging):
+    utils.configure_logging(1)
+    assert logging.getLogger("toolslib").level == logging.INFO
+
+
+def test_configure_logging_verbose_debug(_restore_logging):
+    utils.configure_logging(2)
+    assert logging.getLogger("toolslib").level == logging.DEBUG
+
+
+def test_configure_logging_env_var(monkeypatch, _restore_logging):
+    monkeypatch.setenv("PORTAL_LOG_LEVEL", "DEBUG")
+    utils.configure_logging(0)
+    assert logging.getLogger("toolslib").level == logging.DEBUG
+
+
+def test_configure_logging_flag_overrides_env(monkeypatch, _restore_logging):
+    monkeypatch.setenv("PORTAL_LOG_LEVEL", "DEBUG")
+    utils.configure_logging(1)  # -v wins over env
+    assert logging.getLogger("toolslib").level == logging.INFO
+
+
+def test_configure_logging_invalid_env_falls_back(monkeypatch, _restore_logging):
+    monkeypatch.setenv("PORTAL_LOG_LEVEL", "NOTALEVEL")
+    utils.configure_logging(0)
+    assert logging.getLogger("toolslib").level == logging.WARNING
 
 
 def test_valid_date_accepts_iso_with_and_without_fraction_and_z():

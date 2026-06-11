@@ -11,12 +11,7 @@ import xxhash
 from . import utils
 from . import wcib_format
 
-# Set default level
-logging.basicConfig(level=logging.WARN)
 _logger = logging.getLogger("toolslib.upload")
-_logger.setLevel(logging.DEBUG)
-logging.VERBOSE = 5
-logging.addLevelName(logging.VERBOSE, "VERBOSE")
 
 
 class WCIBError(Exception):

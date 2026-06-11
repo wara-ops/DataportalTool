@@ -292,3 +292,17 @@ def test_upload_threads_tags(runner, mocker, tmp_path):
     kwargs = instance.upload.call_args.kwargs
     assert kwargs["tags"] == ["x"]
     assert kwargs["points_of_interest"] is None
+
+
+def test_verbose_flag_configures_logging(runner, mocker):
+    _patch_conn(mocker)
+    cfg = mocker.patch("dataportaltools.main.utils.configure_logging")
+    runner.invoke(main, ["-vv", "-L"])
+    cfg.assert_called_once_with(2)
+
+
+def test_default_quiet_configures_logging_zero(runner, mocker):
+    _patch_conn(mocker)
+    cfg = mocker.patch("dataportaltools.main.utils.configure_logging")
+    runner.invoke(main, ["-L"])
+    cfg.assert_called_once_with(0)

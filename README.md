@@ -52,6 +52,18 @@ uvx --from ./dist/dataportaltools-0.0.1-py3-none-any.whl dataportaltools --help
 system or active virtualenv. The first run resolves and caches the dependencies
 (`requests`, `click`); later runs reuse the cache and start quickly.
 
+> **Note — picking up local changes.** `uvx --from .` caches the built package
+> keyed by its version (`0.0.1`). If you edit the source without bumping the
+> version, `uvx` keeps serving the old build (e.g. a new flag like `-v` shows
+> `No such option`). Force a rebuild with `--refresh` (or `--no-cache`):
+>
+> ``` bash
+> uvx --refresh --from . dataportaltools --help
+> ```
+>
+> For active development prefer the editable venv (`.venv/bin/dataportaltools …`
+> or `pdm run dataportaltools …`), which always reflects the current source.
+
 Because `--from <source> dataportaltools` is verbose, set the source once and
 alias it for a session:
 
@@ -107,11 +119,23 @@ command-line options:
 |---|---|---|
 | `PORTAL_URL` | `-a` / `--api` | API server URL. Defaults to `https://portal.wara-ops.org/api/v1`. |
 | `PORTAL_TOKEN` | `-t` / `--token` | The token **value** (not a file path). Used when `-t` is not given. A `-t <token file>` always takes precedence. |
+| `PORTAL_LOG_LEVEL` | `-v` / `--verbose` | Log level (e.g. `DEBUG`, `INFO`, `WARNING`) used when no `-v` flag is given. |
 
 Example:
 ``` bash
 export PORTAL_TOKEN="$(cat user.token)"
 dataportaltools -L          # lists datasets using the token from the env
+```
+
+### Logging / verbosity
+
+Output is quiet by default (only warnings and errors). Increase verbosity with
+`-v` (INFO) or `-vv` (DEBUG), or set `PORTAL_LOG_LEVEL` when no flag is passed.
+A `-v` flag takes precedence over the env var.
+``` bash
+dataportaltools -L                 # quiet (warnings/errors only)
+dataportaltools -vv -U 17 -s f.csv # full DEBUG (request/response details)
+PORTAL_LOG_LEVEL=INFO dataportaltools -L
 ```
 
 ### Install

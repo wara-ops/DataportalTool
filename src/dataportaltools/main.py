@@ -132,6 +132,14 @@ _log = logging.getLogger("base")
     "re-uploading. Requires --upload <datasetid> or --listfiles <datasetid> "
     "for the dataset id.",
 )
+@click.option(
+    "--verbose",
+    "-v",
+    count=True,
+    help="Increase log verbosity: -v for INFO, -vv for DEBUG. Default shows "
+    "only warnings/errors. The PORTAL_LOG_LEVEL env var sets a level when no "
+    "-v is given.",
+)
 @click.pass_context
 def main(
     ctx,
@@ -157,12 +165,15 @@ def main(
     tag,
     poi,
     setmeta,
+    verbose,
 ) -> None:
     # This is a Click command exposing the full CLI surface, so the large
     # number of options/branches maps directly onto the documented commands.
     # pylint: disable=too-many-arguments,too-many-positional-arguments
     # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     """Dispatch a single dataportal operation based on the given options."""
+
+    utils.configure_logging(verbose)
 
     config.set_conf(locals())
     _log.debug("config %s", config.get())

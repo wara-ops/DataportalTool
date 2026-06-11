@@ -3,15 +3,39 @@
 import glob
 import json
 import logging
+import os
 import re
 from datetime import datetime, timezone
 
-# Set default level
-logging.basicConfig(level=logging.WARN)
 _logger = logging.getLogger("toolslib.utils")
-_logger.setLevel(logging.INFO)
-logging.VERBOSE = 5
-logging.addLevelName(logging.VERBOSE, "VERBOSE")
+
+# Default to quiet; configure_logging() raises this when asked.
+_LOG_ENV_VAR = "PORTAL_LOG_LEVEL"
+_DEFAULT_LEVEL = logging.WARNING
+
+
+def configure_logging(verbose: int = 0) -> None:
+    """Configure the ``toolslib`` loggers' verbosity.
+
+    Precedence (highest first):
+      * ``verbose`` count from the CLI (-v -> INFO, -vv or more -> DEBUG);
+      * the ``PORTAL_LOG_LEVEL`` environment variable (e.g. DEBUG/INFO/WARNING);
+      * the default (WARNING) -- only warnings and errors are shown.
+
+    Installs a basic stderr handler once so the chosen level actually prints.
+    """
+    if verbose >= 2:
+        level = logging.DEBUG
+    elif verbose == 1:
+        level = logging.INFO
+    else:
+        env = os.environ.get(_LOG_ENV_VAR, "").strip().upper()
+        level = getattr(logging, env, None) if env else None
+        if not isinstance(level, int):
+            level = _DEFAULT_LEVEL
+
+    logging.basicConfig(level=level)
+    logging.getLogger("toolslib").setLevel(level)
 
 
 def parse_info(filename: str) -> dict:
