@@ -1,6 +1,7 @@
 """Tests for dataportaltools.local_utils.utils."""
 
 import logging
+import os
 
 import pytest
 
@@ -442,3 +443,90 @@ def test_rename_from_data_unsupported_format(tmp_path):
     p.write_text("hello", encoding="utf-8")
     with pytest.raises(ValueError):
         utils.rename_from_data(str(p), name="x", kind="metric", dtype="float")
+
+
+# --------------------------------------------------------------------------- #
+# normalize_dataframe / convert_and_rename
+# --------------------------------------------------------------------------- #
+def test_normalize_dataframe_coerces_int_float_object():
+    import pandas as pd
+
+    frame = pd.DataFrame(
+        {
+            "ts": ["2022-01-01T00:00:00Z", "2022-01-01T01:00:00Z"],
+            "counter": ["1", "2"],
+            "value": ["1.5", "2.0"],
+            "label": ["a", "b"],
+        }
+    )
+    review = utils.normalize_dataframe(frame, skip_cols=["ts"])
+    assert pd.api.types.is_integer_dtype(frame["counter"])
+    assert pd.api.types.is_float_dtype(frame["value"])
+    assert not pd.api.types.is_numeric_dtype(frame["label"])
+    assert review == ["label"]
+
+
+def test_normalize_dataframe_skips_listed_columns():
+    import pandas as pd
+
+    frame = pd.DataFrame({"ts": ["1", "2"], "v": ["1", "2"]})
+    review = utils.normalize_dataframe(frame, skip_cols=["ts"])
+    assert not pd.api.types.is_numeric_dtype(frame["ts"])  # skipped, untouched
+    assert pd.api.types.is_integer_dtype(frame["v"])
+    assert review == []
+
+
+def _write_csv_cols(path, **cols):
+    import pandas as pd
+
+    pd.DataFrame(cols).to_csv(path, index=False)
+
+
+def test_convert_and_rename_writes_parquet_zstd(tmp_path):
+    import pandas as pd
+
+    p = tmp_path / "dump.csv"
+    _write_csv_cols(
+        p,
+        timestamp=["2022-12-26T00:00:00Z", "2022-12-27T00:00:00Z"],
+        counter=["1", "2"],
+        label=["a", "b"],
+    )
+    ok, out_path, review = utils.convert_and_rename(
+        str(p), name="history", kind="metric", dtype="float"
+    )
+    assert ok
+    assert out_path.endswith(".parquet.zst")
+    assert os.path.basename(out_path) == (
+        "history_float_2022-12-26T00:00:00Z_2022-12-27T00:00:00Z_2_raw.parquet.zst"
+    )
+    assert review == ["label"]
+    # The written file is valid parquet with coerced dtypes.
+    df = pd.read_parquet(out_path)
+    assert pd.api.types.is_integer_dtype(df["counter"])
+    assert not pd.api.types.is_numeric_dtype(df["label"])
+
+
+def test_convert_and_rename_rejects_underscore_name(tmp_path):
+    p = tmp_path / "dump.csv"
+    _write_csv_cols(p, timestamp=["2022-12-26T00:00:00Z"], v=["1"])
+    ok, out_path, review = utils.convert_and_rename(
+        str(p), name="bad_name", kind="metric", dtype="float"
+    )
+    assert not ok
+    assert out_path == ""
+    assert review == []
+
+
+def test_convert_and_rename_out_dir(tmp_path):
+    p = tmp_path / "dump.csv"
+    _write_csv_cols(
+        p, timestamp=["2022-12-26T00:00:00Z", "2022-12-27T00:00:00Z"], v=["1", "2"]
+    )
+    out = tmp_path / "out"
+    out.mkdir()
+    ok, out_path, _ = utils.convert_and_rename(
+        str(p), name="h", kind="metric", dtype="float", out_dir=str(out)
+    )
+    assert ok
+    assert os.path.dirname(out_path) == str(out)

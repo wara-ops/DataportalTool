@@ -144,7 +144,8 @@ _log = logging.getLogger("base")
     help="Derive a naming-convention filename from a data file (reads the data "
     "to get count/start/stop). Requires --name and --kind; use --dtype/--flag/"
     "--size for the parts that cannot be inferred. Prints the new name; pass "
-    "--apply to rename the file on disk.",
+    "--apply to also normalize column dtypes and rewrite the file as the "
+    "preferred parquet+zstd form on disk.",
 )
 @click.option("--name", default="", metavar="<name>", help="Series name for --rename.")
 @click.option(
@@ -156,7 +157,9 @@ _log = logging.getLogger("base")
 @click.option(
     "--apply/--no-apply",
     default=False,
-    help="With --rename, rename the file on disk instead of only printing.",
+    help="With --rename, write a normalized parquet+zstd file (coercing "
+    "columns int->float->text) named per the convention; warns about columns "
+    "left as text. Without it, only the suggested name is printed.",
 )
 @click.option(
     "--verbose",
@@ -210,23 +213,40 @@ def main(
     if rename is not None:
         if not name or not kind:
             raise click.UsageError("--rename requires --name and --kind")
-        ok, new_name = utils.rename_from_data(
-            rename,
-            name=name,
-            kind=kind,
-            dtype=dtype,
-            flag=flag or "raw",
-            size=size,
-            timestamp_col=tscol,
-        )
-        if not ok:
-            print("Failed to build a name from the data (see log for details)")
-            ctx.exit(1)
         if apply:
-            target = os.path.join(os.path.dirname(rename), new_name)
-            os.rename(rename, target)
-            print(target)
+            # Normalize column dtypes and write the preferred parquet+zstd form.
+            ok, out_path, review = utils.convert_and_rename(
+                rename,
+                name=name,
+                kind=kind,
+                dtype=dtype,
+                flag=flag or "raw",
+                size=size,
+                timestamp_col=tscol,
+            )
+            if not ok:
+                print("Failed to convert/rename the file (see log for details)")
+                ctx.exit(1)
+            if review:
+                print(
+                    "Review: could not infer a numeric type for column(s): "
+                    + ", ".join(review)
+                    + " (left as text)"
+                )
+            print(out_path)
         else:
+            ok, new_name = utils.rename_from_data(
+                rename,
+                name=name,
+                kind=kind,
+                dtype=dtype,
+                flag=flag or "raw",
+                size=size,
+                timestamp_col=tscol,
+            )
+            if not ok:
+                print("Failed to build a name from the data (see log for details)")
+                ctx.exit(1)
             print(new_name)
         ctx.exit(0)
 

@@ -345,13 +345,16 @@ def test_rename_requires_name_and_kind(runner, mocker, tmp_path):
     assert "requires --name and --kind" in result.output
 
 
-def test_rename_apply_renames_on_disk(runner, mocker, tmp_path):
+def test_rename_apply_converts_to_parquet_zstd(runner, mocker, tmp_path):
     _patch_conn(mocker)
     import pandas as pd
 
     p = tmp_path / "raw.csv"
     pd.DataFrame(
-        {"timestamp": ["2022-12-26T00:00:00Z", "2022-12-27T00:00:00Z"]}
+        {
+            "timestamp": ["2022-12-26T00:00:00Z", "2022-12-27T00:00:00Z"],
+            "label": ["a", "b"],
+        }
     ).to_csv(p, index=False)
     result = runner.invoke(
         main,
@@ -369,7 +372,11 @@ def test_rename_apply_renames_on_disk(runner, mocker, tmp_path):
     )
     assert result.exit_code == 0
     expected = (
-        tmp_path / "history_float_2022-12-26T00:00:00Z_2022-12-27T00:00:00Z_2_raw.csv"
+        tmp_path
+        / "history_float_2022-12-26T00:00:00Z_2022-12-27T00:00:00Z_2_raw.parquet.zst"
     )
     assert expected.exists()
-    assert not p.exists()
+    # Non-destructive: the source file is kept.
+    assert p.exists()
+    # The text column that could not be coerced is flagged for review.
+    assert "label" in result.output

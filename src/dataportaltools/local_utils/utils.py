@@ -624,3 +624,103 @@ def rename_from_data(
     suffix = base[len(base.split(".")[0]) :]  # ".csv.zst" etc.
     synthetic = f"{name}{suffix}"
     return create_filename(data, synthetic, kind)
+
+
+def normalize_dataframe(frame: object, skip_cols: Optional[list] = None) -> list:
+    """Coerce non-numeric columns to a tighter dtype, in place.
+
+    For each column not in ``skip_cols`` that is not already numeric, try to
+    convert it to integer, then to float, otherwise leave it as text. Columns
+    that could not be made numeric are returned so the caller can ask the user
+    to review them (the type could not be determined automatically).
+
+    Works across pandas versions where string columns may report ``object`` or
+    the newer ``str``/``string`` dtype.
+
+    Returns
+    -------
+    list[str]
+        Names of the columns left as (non-numeric) text after coercion.
+    """
+    import pandas as pd  # pylint: disable=import-outside-toplevel
+
+    skip = set(skip_cols or [])
+    text_cols = []
+    for col in frame.columns:
+        if col in skip:
+            continue
+        # Leave already-numeric columns as they are (int/float/etc.).
+        if pd.api.types.is_numeric_dtype(frame[col]):
+            continue
+
+        numeric = pd.to_numeric(frame[col], errors="coerce")
+        if numeric.notna().all():
+            # All values parsed as numbers: prefer int when they are integral.
+            if (numeric == numeric.astype("int64")).all():
+                frame[col] = numeric.astype("int64")
+            else:
+                frame[col] = numeric.astype("float64")
+        else:
+            # Could not be made numeric; leave as text and flag for review.
+            text_cols.append(str(col))
+
+    return text_cols
+
+
+def convert_and_rename(
+    path: str,
+    name: str,
+    kind: str,
+    dtype: str = "",
+    flag: str = "raw",
+    size: str = "",
+    timestamp_col: Optional[str] = None,
+    out_dir: Optional[str] = None,
+) -> tuple[bool, str, list]:
+    # Mirrors rename_from_data plus an output directory.
+    # pylint: disable=too-many-arguments,too-many-positional-arguments
+    # pylint: disable=too-many-locals
+    """Normalize a data file and write it as parquet + zstd with a convention name.
+
+    Reads ``path``, coerces non-timestamp ``object`` columns (int -> float ->
+    object) via :func:`normalize_dataframe`, derives the convention name with
+    the preferred ``.parquet.zst`` form, and writes the normalized DataFrame
+    there. Returns ``(ok, out_path, object_columns)`` where ``object_columns``
+    lists columns the user should review.
+    """
+    import pandas as pd  # pylint: disable=import-outside-toplevel
+
+    if "_" in name:
+        _logger.error("convert_and_rename, name must not contain '_': '%s'", name)
+        return False, "", []
+
+    frame = _read_dataframe(path)
+    if len(frame) <= 0:
+        _logger.error("convert_and_rename, '%s' has no rows", path)
+        return False, "", []
+
+    col = _detect_timestamp_column(frame, timestamp_col)
+    times = pd.to_datetime(frame[col], errors="coerce", utc=True).dropna()
+    if times.empty:
+        _logger.error("convert_and_rename, no valid timestamps in '%s'", col)
+        return False, "", []
+
+    object_cols = normalize_dataframe(frame, skip_cols=[col])
+
+    data = {
+        "datatype": dtype,
+        "dataflag": flag,
+        "start": times.min().isoformat(),
+        "stop": times.max().isoformat(),
+        "count": len(frame),
+        "size": size,
+    }
+    # Preferred storage format per the naming convention: parquet + zstd.
+    ok, new_name = create_filename(data, f"{name}.parquet.zst", kind)
+    if not ok:
+        return False, "", object_cols
+
+    target_dir = out_dir if out_dir is not None else os.path.dirname(path)
+    out_path = os.path.join(target_dir, new_name)
+    frame.to_parquet(out_path, compression="zstd")
+    return True, out_path, object_cols
