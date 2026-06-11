@@ -42,12 +42,6 @@ lint:
   script:
     - tox -e $TOX_ENV
 
-test:py310:
-  <<: *test_template
-  image: python:3.10-slim
-  variables:
-    TOX_ENV: py310
-
 test:py311:
   <<: *test_template
   image: python:3.11-slim

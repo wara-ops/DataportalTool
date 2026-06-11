@@ -2,3 +2,6 @@
 requests~=2.34
 click~=8.4
 xxhash~=3.5
+pandas~=3.0
+pyarrow~=24.0
+zstandard~=0.25

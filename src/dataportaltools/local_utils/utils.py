@@ -6,6 +6,7 @@ import logging
 import os
 import re
 from datetime import datetime, timezone
+from typing import Optional
 
 _logger = logging.getLogger("toolslib.utils")
 
@@ -501,3 +502,125 @@ def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
             new_name = f"{new_name}.{compression}"
 
     return True, new_name
+
+
+def _read_dataframe(path: str) -> object:
+    """Load ``path`` into a pandas DataFrame, dispatching on the extension.
+
+    Supports ``.csv``, ``.parquet`` and ``.pkl`` (pandas pickle), each optionally
+    compressed (``.gz``/``.bz2``/``.zst``). pandas/pyarrow handle the formats and
+    the compression libraries; ``.zst`` needs the ``zstandard`` package, which is
+    a project dependency.
+    """
+    # Imported lazily so the heavy pandas import is only paid when a rename is
+    # actually requested, not on every CLI invocation.
+    import pandas as pd  # pylint: disable=import-outside-toplevel
+
+    lower = path.lower()
+    # Strip a trailing compression suffix to find the format extension.
+    stem = re.sub(r"\.(gz|bz2|zst|zstd)$", "", lower)
+
+    if stem.endswith(".parquet"):
+        return pd.read_parquet(path)
+    if stem.endswith(".pkl"):
+        return pd.read_pickle(path)
+    if stem.endswith(".csv"):
+        return pd.read_csv(path)
+    raise ValueError(f"Unsupported file format for '{path}' (use csv/parquet/pkl)")
+
+
+def _detect_timestamp_column(frame: object, timestamp_col: Optional[str]) -> str:
+    """Return the timestamp column name, validating or auto-detecting it."""
+    columns = list(frame.columns)
+    if timestamp_col is not None:
+        if timestamp_col not in columns:
+            raise ValueError(
+                f"Timestamp column '{timestamp_col}' not found; columns: {columns}"
+            )
+        return timestamp_col
+
+    # Auto-detect: first column whose name hints at time, else the first column.
+    for col in columns:
+        if re.search(r"time|date|ts|timestamp", str(col), re.IGNORECASE):
+            return col
+    if not columns:
+        raise ValueError("File has no columns to derive timestamps from")
+    return columns[0]
+
+
+def rename_from_data(
+    path: str,
+    name: str,
+    kind: str,
+    dtype: str = "",
+    flag: str = "raw",
+    size: str = "",
+    timestamp_col: Optional[str] = None,
+) -> tuple[bool, str]:
+    # The parameters mirror the naming-convention fields that pandas cannot
+    # infer (name/kind/dtype/flag/size) plus the timestamp column.
+    # pylint: disable=too-many-arguments,too-many-positional-arguments
+    # pylint: disable=too-many-locals
+    """Build a naming-convention filename for ``path`` from its data.
+
+    Reads the file with pandas, derives ``count`` (number of rows) and
+    ``start``/``stop`` (min/max of the timestamp column, auto-detected when
+    ``timestamp_col`` is not given), then delegates to :func:`create_filename`.
+    The fields pandas cannot infer must be supplied by the caller.
+
+    Parameters
+    ----------
+    path : str
+        Source data file (``.csv``/``.parquet``/``.pkl``, optionally compressed).
+    name : str
+        Series/source name for the ``<name>`` part (must not contain ``_``).
+    kind : str
+        ``"metric"`` or ``"log"``.
+    dtype : str
+        Value type for a metric (e.g. ``float``); required for metric names.
+    flag : str
+        Data flag (default ``"raw"``).
+    size : str
+        Uncompressed size; required for log names.
+    timestamp_col : str | None
+        Column holding the timestamps; auto-detected when ``None``.
+
+    Returns
+    -------
+    tuple[bool, str]
+        ``(True, new_name)`` on success, otherwise ``(False, "")``.
+    """
+    # Lazy import: only pay the pandas import cost when renaming.
+    import pandas as pd  # pylint: disable=import-outside-toplevel
+
+    if "_" in name:
+        _logger.error("rename_from_data, name must not contain '_': '%s'", name)
+        return False, ""
+
+    frame = _read_dataframe(path)
+    count = len(frame)
+    if count <= 0:
+        _logger.error("rename_from_data, '%s' has no rows", path)
+        return False, ""
+
+    col = _detect_timestamp_column(frame, timestamp_col)
+    times = pd.to_datetime(frame[col], errors="coerce", utc=True).dropna()
+    if times.empty:
+        _logger.error("rename_from_data, no valid timestamps in column '%s'", col)
+        return False, ""
+
+    data = {
+        "datatype": dtype,
+        "dataflag": flag,
+        "start": times.min().isoformat(),
+        "stop": times.max().isoformat(),
+        "count": count,
+        "size": size,
+    }
+
+    # create_filename derives base/ext/comp from the file name, so pass the
+    # source basename but with the desired <name> as the base.
+    base = os.path.basename(path)
+    suffix = base[len(base.split(".")[0]) :]  # ".csv.zst" etc.
+    synthetic = f"{name}{suffix}"
+    return create_filename(data, synthetic, kind)

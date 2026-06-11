@@ -356,3 +356,89 @@ def test_create_filename_no_extension_rejected():
     }
     ok, _ = utils.create_filename(data, "kenny", "log")
     assert not ok
+
+
+# --------------------------------------------------------------------------- #
+# rename_from_data
+# --------------------------------------------------------------------------- #
+def _write_csv(path, timestamps, col="timestamp"):
+    import pandas as pd
+
+    pd.DataFrame({col: timestamps, "value": range(len(timestamps))}).to_csv(
+        path, index=False
+    )
+
+
+def test_rename_from_data_csv_metric(tmp_path):
+    p = tmp_path / "raw.csv"
+    _write_csv(p, ["2022-12-26T00:00:00Z", "2022-12-27T00:00:00Z"])
+    ok, name = utils.rename_from_data(
+        str(p), name="history", kind="metric", dtype="float", flag="raw"
+    )
+    assert ok
+    assert name == ("history_float_2022-12-26T00:00:00Z_2022-12-27T00:00:00Z_2_raw.csv")
+
+
+def test_rename_from_data_autodetect_time_column(tmp_path):
+    p = tmp_path / "d.csv"
+    _write_csv(p, ["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z"], col="time")
+    ok, name = utils.rename_from_data(str(p), name="srs", kind="metric", dtype="uint")
+    assert ok
+    assert name.startswith("srs_uint_2024-01-01T00:00:00Z_2024-01-01T01:00:00Z_2_")
+
+
+def test_rename_from_data_parquet(tmp_path):
+    import pandas as pd
+
+    p = tmp_path / "d.parquet"
+    pd.DataFrame(
+        {"timestamp": pd.to_datetime(["2024-02-01T00:00:00Z", "2024-02-01T06:00:00Z"])}
+    ).to_parquet(p)
+    ok, name = utils.rename_from_data(str(p), name="srs", kind="metric", dtype="float")
+    assert ok
+    assert name.endswith(".parquet")
+    assert "_2_" in name
+
+
+def test_rename_from_data_preserves_compression_suffix(tmp_path):
+    p = tmp_path / "d.csv.zst"
+    _write_csv(p, ["2024-02-01T00:00:00Z", "2024-02-01T12:00:00Z"])
+    ok, name = utils.rename_from_data(str(p), name="logz", kind="metric", dtype="float")
+    assert ok
+    assert name.endswith(".csv.zst")
+
+
+def test_rename_from_data_rejects_underscore_name(tmp_path):
+    p = tmp_path / "raw.csv"
+    _write_csv(p, ["2022-12-26T00:00:00Z", "2022-12-27T00:00:00Z"])
+    ok, name = utils.rename_from_data(
+        str(p), name="bad_name", kind="metric", dtype="float"
+    )
+    assert not ok
+    assert name == ""
+
+
+def test_rename_from_data_explicit_tscol(tmp_path):
+    p = tmp_path / "d.csv"
+    _write_csv(p, ["2024-03-01T00:00:00Z", "2024-03-02T00:00:00Z"], col="when")
+    ok, name = utils.rename_from_data(
+        str(p), name="x", kind="metric", dtype="float", timestamp_col="when"
+    )
+    assert ok
+    assert "2024-03-01T00:00:00Z" in name
+
+
+def test_rename_from_data_bad_tscol_raises(tmp_path):
+    p = tmp_path / "d.csv"
+    _write_csv(p, ["2024-03-01T00:00:00Z"])
+    with pytest.raises(ValueError):
+        utils.rename_from_data(
+            str(p), name="x", kind="metric", dtype="float", timestamp_col="nope"
+        )
+
+
+def test_rename_from_data_unsupported_format(tmp_path):
+    p = tmp_path / "d.txt"
+    p.write_text("hello", encoding="utf-8")
+    with pytest.raises(ValueError):
+        utils.rename_from_data(str(p), name="x", kind="metric", dtype="float")

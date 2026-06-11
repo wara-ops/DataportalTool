@@ -75,15 +75,19 @@ _log = logging.getLogger("base")
     "-t",
     default="",
     metavar="<token file>",
+    show_envvar=True,
     help="Name of file containing token. If omitted, the token value is read "
     "from the PORTAL_TOKEN environment variable.",
 )
 @click.option(
     "--api",
     "-a",
-    default=lambda: os.environ.get("PORTAL_URL", "https://portal.wara-ops.org/api/v1"),
+    default="https://portal.wara-ops.org/api/v1",
+    envvar="PORTAL_URL",
+    show_envvar=True,
     metavar="<url>",
-    help="WARA-Ops API",
+    help="WARA-Ops API base URL. Falls back to the PORTAL_URL environment "
+    "variable, then the public portal.",
 )
 @click.option(
     "--start",
@@ -133,6 +137,28 @@ _log = logging.getLogger("base")
     "for the dataset id.",
 )
 @click.option(
+    "--rename",
+    default=None,
+    type=click.Path(exists=True),
+    metavar="<file>",
+    help="Derive a naming-convention filename from a data file (reads the data "
+    "to get count/start/stop). Requires --name and --kind; use --dtype/--flag/"
+    "--size for the parts that cannot be inferred. Prints the new name; pass "
+    "--apply to rename the file on disk.",
+)
+@click.option("--name", default="", metavar="<name>", help="Series name for --rename.")
+@click.option(
+    "--tscol",
+    default=None,
+    metavar="<column>",
+    help="Timestamp column for --rename (auto-detected when omitted).",
+)
+@click.option(
+    "--apply/--no-apply",
+    default=False,
+    help="With --rename, rename the file on disk instead of only printing.",
+)
+@click.option(
     "--verbose",
     "-v",
     count=True,
@@ -165,6 +191,10 @@ def main(
     tag,
     poi,
     setmeta,
+    rename,
+    name,
+    tscol,
+    apply,
     verbose,
 ) -> None:
     # This is a Click command exposing the full CLI surface, so the large
@@ -174,6 +204,31 @@ def main(
     """Dispatch a single dataportal operation based on the given options."""
 
     utils.configure_logging(verbose)
+
+    # Offline operation: derive a naming-convention filename from a data file.
+    # Handled before connecting since it does not touch the API.
+    if rename is not None:
+        if not name or not kind:
+            raise click.UsageError("--rename requires --name and --kind")
+        ok, new_name = utils.rename_from_data(
+            rename,
+            name=name,
+            kind=kind,
+            dtype=dtype,
+            flag=flag or "raw",
+            size=size,
+            timestamp_col=tscol,
+        )
+        if not ok:
+            print("Failed to build a name from the data (see log for details)")
+            ctx.exit(1)
+        if apply:
+            target = os.path.join(os.path.dirname(rename), new_name)
+            os.rename(rename, target)
+            print(target)
+        else:
+            print(new_name)
+        ctx.exit(0)
 
     config.set_conf(locals())
     _log.debug("config %s", config.get())

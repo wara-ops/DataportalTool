@@ -306,3 +306,70 @@ def test_default_quiet_configures_logging_zero(runner, mocker):
     cfg = mocker.patch("dataportaltools.main.utils.configure_logging")
     runner.invoke(main, ["-L"])
     cfg.assert_called_once_with(0)
+
+
+def test_rename_prints_name(runner, mocker, tmp_path):
+    _patch_conn(mocker)
+    import pandas as pd
+
+    p = tmp_path / "raw.csv"
+    pd.DataFrame(
+        {"timestamp": ["2022-12-26T00:00:00Z", "2022-12-27T00:00:00Z"]}
+    ).to_csv(p, index=False)
+    result = runner.invoke(
+        main,
+        [
+            "--rename",
+            str(p),
+            "--name",
+            "history",
+            "--kind",
+            "metric",
+            "--dtype",
+            "float",
+        ],
+    )
+    assert result.exit_code == 0
+    assert (
+        "history_float_2022-12-26T00:00:00Z_2022-12-27T00:00:00Z_2_raw.csv"
+        in result.output
+    )
+
+
+def test_rename_requires_name_and_kind(runner, mocker, tmp_path):
+    _patch_conn(mocker)
+    p = tmp_path / "raw.csv"
+    p.write_text("timestamp\n2022-12-26T00:00:00Z\n", encoding="utf-8")
+    result = runner.invoke(main, ["--rename", str(p), "--kind", "metric"])
+    assert result.exit_code != 0
+    assert "requires --name and --kind" in result.output
+
+
+def test_rename_apply_renames_on_disk(runner, mocker, tmp_path):
+    _patch_conn(mocker)
+    import pandas as pd
+
+    p = tmp_path / "raw.csv"
+    pd.DataFrame(
+        {"timestamp": ["2022-12-26T00:00:00Z", "2022-12-27T00:00:00Z"]}
+    ).to_csv(p, index=False)
+    result = runner.invoke(
+        main,
+        [
+            "--rename",
+            str(p),
+            "--name",
+            "history",
+            "--kind",
+            "metric",
+            "--dtype",
+            "float",
+            "--apply",
+        ],
+    )
+    assert result.exit_code == 0
+    expected = (
+        tmp_path / "history_float_2022-12-26T00:00:00Z_2022-12-27T00:00:00Z_2_raw.csv"
+    )
+    assert expected.exists()
+    assert not p.exists()
