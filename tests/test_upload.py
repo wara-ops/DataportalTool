@@ -201,9 +201,13 @@ def test_upload_extra_empty_prefix(tmp_path):
     sess.post.return_value = post_resp
     result = wc._upload_extra(1, str(f), "", False)
     assert result == {"path": "p"}
+    # Empty prefix -> sent as "" (server applies the metadata/ default).
+    _, kwargs = sess.post.call_args
+    assert kwargs["data"]["prefix"] == ""
+    assert kwargs["data"]["filename"] == "file.bin"
 
 
-def test_upload_extra_two_part_prefix(tmp_path):
+def test_upload_extra_two_level_prefix(tmp_path):
     wc, sess = _connected()
     f = tmp_path / "file.bin"
     f.write_bytes(b"data")
@@ -211,8 +215,25 @@ def test_upload_extra_two_part_prefix(tmp_path):
     post_resp.json.return_value = {"path": "p"}
     post_resp.raise_for_status.return_value = None
     sess.post.return_value = post_resp
-    result = wc._upload_extra(1, str(f), "dir/newname", False)
+    # Two path segments are kept as nested folders (no longer a rename).
+    result = wc._upload_extra(1, str(f), "dir1/dir2", False)
     assert result == {"path": "p"}
+    _, kwargs = sess.post.call_args
+    assert kwargs["data"]["prefix"] == "dir1/dir2"
+    assert kwargs["data"]["filename"] == "file.bin"
+
+
+def test_upload_extra_trailing_slash_ignored(tmp_path):
+    wc, sess = _connected()
+    f = tmp_path / "file.bin"
+    f.write_bytes(b"data")
+    post_resp = MagicMock()
+    post_resp.json.return_value = {"path": "p"}
+    post_resp.raise_for_status.return_value = None
+    sess.post.return_value = post_resp
+    wc._upload_extra(1, str(f), "dir1/dir2/", False)
+    _, kwargs = sess.post.call_args
+    assert kwargs["data"]["prefix"] == "dir1/dir2"
 
 
 def test_upload_extra_dryrun(tmp_path):
@@ -221,14 +242,25 @@ def test_upload_extra_dryrun(tmp_path):
     f.write_bytes(b"data")
     assert wc._upload_extra(1, str(f), "dir", True) == {}
     sess.put.assert_not_called()
+    sess.post.assert_not_called()
 
 
-def test_upload_extra_incomplete_body(tmp_path):
-    wc, _ = _connected()
+def test_upload_extra_too_many_levels_raises(tmp_path):
+    wc, sess = _connected()
     f = tmp_path / "file.bin"
     f.write_bytes(b"data")
-    # prefix "/" -> sp == ["", ""] -> body stays empty -> returns {}
-    assert wc._upload_extra(1, str(f), "/", False) == {}
+    with pytest.raises(WCIBError):
+        wc._upload_extra(1, str(f), "dir1/dir2/dir3", False)
+    sess.post.assert_not_called()
+
+
+def test_upload_extra_unsafe_segment_raises(tmp_path):
+    wc, sess = _connected()
+    f = tmp_path / "file.bin"
+    f.write_bytes(b"data")
+    with pytest.raises(WCIBError):
+        wc._upload_extra(1, str(f), "../escape", False)
+    sess.post.assert_not_called()
 
 
 # --------------------------------------------------------------------------- #
@@ -251,7 +283,7 @@ def test_upload_extra_branch(tmp_path, mocker):
     f.write_bytes(b"data")
     mocker.patch.object(upload.utils, "get_all_src_files", return_value=[str(f)])
     mocker.patch.object(wc, "_upload_extra_files", return_value=(0, {str(f): "dst"}))
-    ret = wc.upload(1, [str(f)], {}, "prefixdir", "", False)
+    ret = wc.upload(1, [str(f)], {}, "prefixdir", "", False, extra=True)
     assert ret == 0
     wc._upload_extra_files.assert_called_once()
 
@@ -634,7 +666,7 @@ def test_upload_extrafile_threads_annotations(tmp_path, mocker):
     # annotation PUT returns {}
     _put_ok(sess, {})
 
-    ret = wc.upload(1, [str(f)], {}, "metadata", "", False, tags=["x"])
+    ret = wc.upload(1, [str(f)], {}, "metadata", "", False, tags=["x"], extra=True)
     assert ret == 0
 
     # THIS IS THE EXTRAFILE-WORKS VERIFICATION: annotation PUT to /files/7.
@@ -704,7 +736,7 @@ def test_upload_extrafile_end_to_end_with_annotation(tmp_path, mocker):
     sess.post.side_effect = _post
     sess.put.side_effect = _put
 
-    ret = wc.upload(1, [str(f)], {}, "metadata", "", False, tags=["x"])
+    ret = wc.upload(1, [str(f)], {}, "metadata", "", False, tags=["x"], extra=True)
     assert ret == 0
 
     # Extrafiles upload is a POST (multipart data + Idempotency-Key).

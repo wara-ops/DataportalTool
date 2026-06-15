@@ -380,3 +380,82 @@ def test_rename_apply_converts_to_parquet_zstd(runner, mocker, tmp_path):
     assert p.exists()
     # The text column that could not be coerced is flagged for review.
     assert "label" in result.output
+
+
+def test_rename_apply_convert_failure(runner, mocker, tmp_path):
+    _patch_conn(mocker)
+    mocker.patch(
+        "dataportaltools.main.utils.convert_and_rename", return_value=(False, "", [])
+    )
+    p = tmp_path / "d.csv"
+    p.write_text("timestamp\n2022-12-26T00:00:00Z\n", encoding="utf-8")
+    result = runner.invoke(
+        main,
+        [
+            "--rename",
+            str(p),
+            "--name",
+            "h",
+            "--kind",
+            "metric",
+            "--dtype",
+            "float",
+            "--apply",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "Failed to convert/rename" in result.output
+
+
+def test_rename_build_failure(runner, mocker, tmp_path):
+    _patch_conn(mocker)
+    mocker.patch(
+        "dataportaltools.main.utils.rename_from_data", return_value=(False, "")
+    )
+    p = tmp_path / "d.csv"
+    p.write_text("timestamp\n2022-12-26T00:00:00Z\n", encoding="utf-8")
+    result = runner.invoke(
+        main, ["--rename", str(p), "--name", "h", "--kind", "metric"]
+    )
+    assert result.exit_code != 0
+    assert "Failed to build a name" in result.output
+
+
+def test_prefix_requires_extra_file(runner, mocker, tmp_path):
+    _patch_conn(mocker)
+    f = tmp_path / "file.bin"
+    f.write_text("x")
+    result = runner.invoke(main, ["-U", "1", "-s", str(f), "-p", "docs"])
+    assert result.exit_code != 0
+    assert "requires --extra-file" in result.output
+
+
+def test_extra_file_flag_routes_extra(runner, mocker, tmp_path):
+    _, instance = _patch_conn(mocker)
+    instance.upload.return_value = 0
+    f = tmp_path / "file.bin"
+    f.write_text("x")
+    result = runner.invoke(main, ["-U", "1", "-s", str(f), "-e"])
+    assert result.exit_code == 0
+    assert instance.upload.call_args.kwargs["extra"] is True
+
+
+def test_extra_file_with_prefix(runner, mocker, tmp_path):
+    _, instance = _patch_conn(mocker)
+    instance.upload.return_value = 0
+    f = tmp_path / "file.bin"
+    f.write_text("x")
+    result = runner.invoke(main, ["-U", "1", "-s", str(f), "-e", "-p", "docs/api"])
+    assert result.exit_code == 0
+    assert instance.upload.call_args.kwargs["extra"] is True
+    assert instance.upload.call_args.args[3] == "docs/api"
+
+
+def test_no_extra_flag_routes_datafile(runner, mocker, tmp_path):
+    _, instance = _patch_conn(mocker)
+    instance.upload.return_value = 0
+    f = tmp_path / "file.bin"
+    f.write_text("x")
+    result = runner.invoke(main, ["-U", "1", "-s", str(f)])
+    assert result.exit_code == 0
+    assert instance.upload.call_args.kwargs["extra"] is False

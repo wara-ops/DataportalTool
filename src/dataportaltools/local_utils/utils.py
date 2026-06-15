@@ -339,7 +339,11 @@ def _parse_time(s: str) -> tuple[object, str]:
 
         try:
             time_o = datetime.fromtimestamp(time_f, timezone.utc)
-        except (ValueError, OverflowError, OSError) as e:
+        except (
+            ValueError,
+            OverflowError,
+            OSError,
+        ) as e:  # pragma: no cover - bounded epoch rarely overflows
             _logger.debug("Not epoch, it seems, %s", str(e))
             return None, ""
     else:
@@ -350,7 +354,7 @@ def _parse_time(s: str) -> tuple[object, str]:
             _logger.debug("Invalid date format '%s', %s", s, str(e))
             return None, ""
 
-    if time_o is None:
+    if time_o is None:  # pragma: no cover - defensive, should not happen
         # this shall NOT happen
         return None, ""
 

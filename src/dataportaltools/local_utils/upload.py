@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 from typing import Optional, Union
 
 import requests
@@ -351,32 +352,29 @@ class WCIBConnection:
         Raises
         ------
         """
-        headers = {
-            "Authorization": f"Bearer {self.token_data}"
-        }  # , "Content-Type": "multipart/form-data"}
+        headers = {"Authorization": f"Bearer {self.token_data}"}
 
-        # prefix may be "dir", "dir/" or "dir/newname"
-        body = {}
-        sp = prefix.split("/")
-        if len(sp) == 1:
-            if sp[0]:
-                body["prefix"] = sp[0]
-            else:
-                body["prefix"] = "extrafiles"
+        # The prefix is an optional sub-folder (up to two levels, e.g.
+        # "dir1/dir2") under the server's hidden "metadata/" base. Empty
+        # segments (e.g. a trailing slash) are ignored. Anything deeper or
+        # unsafe is rejected loudly so the upload is never silently skipped.
+        segments = [s for s in prefix.split("/") if s]
+        if len(segments) > 2:
+            raise WCIBError(
+                f"prefix '{prefix}' has too many levels "
+                "(at most two are allowed, e.g. 'dir1/dir2')"
+            )
+        bad = next(
+            (s for s in segments if s in (".", "..") or re.search(r"[\\\x00-\x1f]", s)),
+            None,
+        )
+        if bad is not None:
+            raise WCIBError(f"invalid prefix segment: '{bad}'")
 
-            body["filename"] = os.path.basename(fname)
-
-        if len(sp) == 2:
-            _prefix, _filename = sp
-            if _prefix:
-                body["prefix"] = _prefix
-                if _filename:
-                    body["filename"] = _filename
-                else:
-                    body["filename"] = os.path.basename(fname)
-            else:
-                if _filename:
-                    body["prefix"] = _filename
+        body = {
+            "prefix": "/".join(segments),
+            "filename": os.path.basename(fname),
+        }
 
         _logger.debug(
             "_upload_extra, datasetid %d, fname %s, prefix %s, body %s",
@@ -385,14 +383,6 @@ class WCIBConnection:
             prefix,
             body,
         )
-
-        if len(body) != 2:
-            _logger.info(
-                "_upload_extra, datasetid %d, incomplete prefix and body %s",
-                datasetid,
-                body,
-            )
-            return {}
 
         pth = f"{self.url}/dataset/{datasetid}/extrafiles"
 
@@ -741,6 +731,7 @@ class WCIBConnection:
         dryrun: bool,
         tags: Optional[list] = None,
         points_of_interest: Optional[list] = None,
+        extra: bool = False,
     ) -> int:
         """
         Uploads a file to a dataset
@@ -761,8 +752,8 @@ class WCIBConnection:
                     "size": int | str,
                 }
         prefix : str
-            Prefix (upload dir) for extrafiles. If set, file is assumed to be an
-            extrafile regardless of naming or parameters.
+            Optional sub-folder (up to two levels) for an extra file. Only used
+            when ``extra`` is True.
         kind : str
             Either "log" or "metric"
         dryrun : bool
@@ -775,6 +766,9 @@ class WCIBConnection:
             Optional points-of-interest time ranges
             (``{"start", "stop", "text"}``) to apply to every freshly-uploaded
             file in the batch. ``None`` leaves them untouched.
+        extra : bool
+            When True, upload the file(s) as extra file(s) (stored verbatim);
+            otherwise they go through the datafile naming-convention path.
 
         Returns
         -------
@@ -795,8 +789,9 @@ class WCIBConnection:
             _logger.info("No files found")
             return 1
 
-        # Extrafiles are uploaded "as is"
-        if prefix != "":
+        # Extra files are uploaded "as is" when the caller marks them as such;
+        # otherwise the files go through the datafile naming-convention path.
+        if extra:
             ok, resp = self._upload_extra_files(
                 datasetid, all_files, prefix, dryrun, tags, points_of_interest
             )

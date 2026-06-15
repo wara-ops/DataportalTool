@@ -530,3 +530,142 @@ def test_convert_and_rename_out_dir(tmp_path):
     )
     assert ok
     assert os.path.dirname(out_path) == str(out)
+
+
+# --------------------------------------------------------------------------- #
+# coverage: parse_info blank lines, create_filename log branch, dataframe I/O
+# --------------------------------------------------------------------------- #
+def test_parse_info_handles_consecutive_blank_lines(tmp_path):
+    md = "# Dataset\n\n\nDummy\n\n\n# Tags\n\na, b\n\n\n"
+    p = tmp_path / "info.md"
+    p.write_text(md, encoding="utf-8")
+    data = utils.parse_info(str(p))
+    assert data["dataset"] == "Dummy"
+    assert data["tags"] == ["a", "b"]
+
+
+def test_create_filename_invalid_stop_rejected():
+    data = {
+        "datatype": "float",
+        "dataflag": "raw",
+        "start": "2022-01-01T00:00:00",
+        "stop": "not-a-date",
+        "count": 5,
+        "size": "",
+    }
+    ok, name = utils.create_filename(data, "x.csv", "metric")
+    assert not ok and name == ""
+
+
+_LOG_BASE = {
+    "dataflag": "raw",
+    "start": "1737645608",
+    "stop": "1737645609",
+    "count": 5,
+}
+
+
+def test_create_filename_log_missing_size():
+    ok, _ = utils.create_filename(dict(_LOG_BASE), "x.csv.zst", "log")
+    assert not ok
+
+
+def test_create_filename_log_missing_compression():
+    ok, _ = utils.create_filename({**_LOG_BASE, "size": "8G"}, "x.csv", "log")
+    assert not ok
+
+
+def test_create_filename_log_ok_without_datatype():
+    ok, name = utils.create_filename({**_LOG_BASE, "size": "8G"}, "x.csv.zst", "log")
+    assert ok
+    assert "_8G_" in name and name.endswith(".zst")
+
+
+def test_create_filename_log_ok_with_datatype():
+    ok, name = utils.create_filename(
+        {**_LOG_BASE, "size": "8G", "type": "json"}, "x.csv.zst", "log"
+    )
+    assert ok
+    assert "_8G_" in name
+
+
+def test_read_dataframe_pickle(tmp_path):
+    import pandas as pd
+
+    p = tmp_path / "d.pkl"
+    pd.DataFrame({"a": [1, 2], "b": [3, 4]}).to_pickle(p)
+    frame = utils._read_dataframe(str(p))
+    assert list(frame.columns) == ["a", "b"]
+    assert len(frame) == 2
+
+
+def test_read_dataframe_csv(tmp_path):
+    import pandas as pd
+
+    p = tmp_path / "d.csv"
+    pd.DataFrame({"a": [1, 2]}).to_csv(p, index=False)
+    frame = utils._read_dataframe(str(p))
+    assert len(frame) == 2
+
+
+def test_detect_timestamp_column_fallback_first_column():
+    import pandas as pd
+
+    frame = pd.DataFrame({"alpha": [1], "beta": [2]})
+    assert utils._detect_timestamp_column(frame, None) == "alpha"
+
+
+def test_detect_timestamp_column_empty_frame_raises():
+    import pandas as pd
+
+    with pytest.raises(ValueError):
+        utils._detect_timestamp_column(pd.DataFrame(), None)
+
+
+def test_rename_from_data_empty_frame(tmp_path):
+    p = tmp_path / "e.csv"
+    p.write_text("timestamp\n", encoding="utf-8")  # header only, 0 rows
+    ok, name = utils.rename_from_data(str(p), name="h", kind="metric", dtype="float")
+    assert not ok and name == ""
+
+
+def test_rename_from_data_no_valid_timestamps(tmp_path):
+    import pandas as pd
+
+    p = tmp_path / "nd.csv"
+    pd.DataFrame({"timestamp": ["x", "y"], "v": [1, 2]}).to_csv(p, index=False)
+    ok, name = utils.rename_from_data(str(p), name="h", kind="metric", dtype="float")
+    assert not ok and name == ""
+
+
+def test_convert_and_rename_empty_frame(tmp_path):
+    p = tmp_path / "e.csv"
+    p.write_text("timestamp\n", encoding="utf-8")
+    ok, out, review = utils.convert_and_rename(
+        str(p), name="h", kind="metric", dtype="float"
+    )
+    assert not ok and out == "" and review == []
+
+
+def test_convert_and_rename_no_valid_timestamps(tmp_path):
+    import pandas as pd
+
+    p = tmp_path / "nd.csv"
+    pd.DataFrame({"timestamp": ["x", "y"]}).to_csv(p, index=False)
+    ok, out, review = utils.convert_and_rename(
+        str(p), name="h", kind="metric", dtype="float"
+    )
+    assert not ok and out == ""
+
+
+def test_convert_and_rename_create_filename_fails(tmp_path):
+    import pandas as pd
+
+    # kind=metric with dtype="" makes create_filename fail; no parquet written.
+    p = tmp_path / "d.csv"
+    pd.DataFrame(
+        {"timestamp": ["2022-12-26T00:00:00Z", "2022-12-27T00:00:00Z"], "v": [1, 2]}
+    ).to_csv(p, index=False)
+    ok, out, _ = utils.convert_and_rename(str(p), name="h", kind="metric", dtype="")
+    assert not ok and out == ""
+    assert not list(tmp_path.glob("*.parquet.zst"))

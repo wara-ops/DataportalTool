@@ -81,7 +81,7 @@ uvx --from . dataportaltools -U 17 -s "./dataset/history_float_2022-12-26T00:00:
 uvx --from . dataportaltools -U 17 -s "./dataset/history_float_2022-12-26T00:00:00Z_2022-12-27T00:00:00Z_140190_raw.csv.zst"
 
 # Upload an extra (non-convention) file into a subfolder
-uvx --from . dataportaltools -U 17 -s ./dataset/README.md -p metadata
+uvx --from . dataportaltools -U 17 -s ./dataset/README.md -e -p metadata
 
 # Delete dataset 17
 uvx --from . dataportaltools -d 17
@@ -243,13 +243,24 @@ Not sure how to name a file? Let the tool derive `start`/`stop`/`count` from the
 data and build the name for you (see
 [Rename a file to the naming convention](#rename-a-file-to-the-naming-convention)).
 
-### Upload an extra file (with a prefix)
-Passing a non-empty prefix with `-p` always uploads the file as an *extra* file,
-regardless of whether its name follows the convention. The file is stored
-verbatim under `<prefix>/<filename>`:
+### Upload an extra file
+Use `-e`/`--extra-file` to upload a file as an *extra* file (stored verbatim,
+not subject to the datafile naming convention):
 ```sh
-dataportaltools -U 17 -s ./dataset/README.md -t user.token -p metadata
+dataportaltools -U 17 -s ./dataset/README.md -t user.token -e
 ```
+Add `-p` to place it in a sub-folder of up to **two** levels (`-p` requires
+`-e`):
+```sh
+# stored under docs/
+dataportaltools -U 17 -s ./dataset/README.md -t user.token -e -p docs
+
+# two nested levels -> docs/api/
+dataportaltools -U 17 -s ./dataset/README.md -t user.token -e -p docs/api
+```
+A prefix deeper than two levels (e.g. `a/b/c`) or with unsafe segments (`..`)
+is rejected with an error rather than silently dropped. A trailing slash is
+ignored (`docs/` is the same as `docs`).
 
 ### Rename a file to the naming convention
 `--rename <file>` reads the data file with pandas and derives the parts it can
@@ -375,8 +386,8 @@ FileID |                      StartDate |                       StopDate |    En
 -------+--------------------------------+--------------------------------+------------+--------------+-----------------------
 
 
-# Upload an extrafile. Note: prefix (destination catalog) must be provided for extrafiles
-$ dataportaltools -U 20 -s README.md -t /tmp/user01_token -p testing
+# Upload an extrafile. Note: use -e; -p sets the destination sub-folder
+$ dataportaltools -U 20 -s README.md -t /tmp/user01_token -e -p testing
 Source                                             | Dest
 ---------------------------------------------------+-------------------------------------------------------------
 README.md                                          | testing/README.md
@@ -442,21 +453,22 @@ DatasetID | ContainerName
 ```
 
 ### Upload an extra file.
-When the ```prefix``` argument, ```-p```, is set, the provided file will be uploaded as an extra file regardless of other parameters.
+Use `-e`/`--extra-file` to upload a file as an extra file. Add `-p` to set the
+destination sub-folder (up to two levels).
 
 ```sh
-$ dataportaltools -a http://127.0.0.1:3001/v1 -U 7 -s extrafile.csv.zst -p larry -t /tmp/user01_token
+$ dataportaltools -a http://127.0.0.1:3001/v1 -U 7 -s extrafile.csv.zst -e -p larry -t /tmp/user01_token
 Source                                             | Dest
 ---------------------------------------------------+-------------------------------------------------------------
 extrafile.csv.zst                                  | larry/extrafile.csv.zst
 ```
 
-Upload a file and rename it.
+Place it under a two-level sub-folder.
 ```sh
-$ dataportaltools -a http://127.0.0.1:3001/v1 -U 7 -s extrafile.csv.zst -p subdir/newname.csv.zst -t /tmp/user01_token
+$ dataportaltools -a http://127.0.0.1:3001/v1 -U 7 -s extrafile.csv.zst -e -p larry/sub -t /tmp/user01_token
 Source                                             | Dest
 ---------------------------------------------------+-------------------------------------------------------------
-extrafile.csv.zst                                  | subdir/newname.csv.zst
+extrafile.csv.zst                                  | larry/sub/extrafile.csv.zst
 ```
 
 ### List all files so far.

@@ -13,7 +13,7 @@ try:
     from .local_utils import config
     from .local_utils import upload as up
     from .local_utils import utils
-except ImportError:
+except ImportError:  # pragma: no cover - direct-script bootstrap fallback
     # Fallback: running this file directly (``python main.py``).
     from local_utils import config
     from local_utils import upload as up
@@ -47,7 +47,17 @@ _log = logging.getLogger("base")
     "-p",
     default="",
     metavar="<top dir>",
-    help="Dest folder in contains, only used in case of extrafile",
+    help="Destination sub-folder (up to two levels) for an extra file. "
+    "Requires --extra-file.",
+)
+@click.option(
+    "--extra-file",
+    "-e",
+    "extra_file",
+    is_flag=True,
+    default=False,
+    help="Upload the file(s) as extra file(s) (stored verbatim, not subject to "
+    "the datafile naming convention). Required to use --prefix.",
 )
 @click.option(
     "--delete",
@@ -177,6 +187,7 @@ def main(
     upload,
     src,
     prefix,
+    extra_file,
     delete,
     listdataset,
     listfiles,
@@ -207,6 +218,10 @@ def main(
     """Dispatch a single dataportal operation based on the given options."""
 
     utils.configure_logging(verbose)
+
+    # --prefix only makes sense for an extra-file upload.
+    if prefix and not extra_file:
+        raise click.UsageError("--prefix requires --extra-file/-e")
 
     # Offline operation: derive a naming-convention filename from a data file.
     # Handled before connecting since it does not touch the API.
@@ -360,8 +375,9 @@ def main(
                     dryrun,
                     tags=tags,
                     points_of_interest=pois,
+                    extra=extra_file,
                 )
-            else:
+            else:  # pragma: no cover - click always supplies a tuple for src
                 ret = 1
         except Exception as e:  # pylint: disable=broad-exception-caught
             # CLI boundary: surface any operation failure as a non-zero exit.
