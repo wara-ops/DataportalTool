@@ -601,9 +601,8 @@ class WCIBConnection:
                 label = self._dest_label(resp_json)
                 if label is not None:
                     resp[f] = label
-            # pylint: disable=broad-exception-caught
             # per-file failures are logged and skipped so other files still upload
-            except Exception as e:
+            except Exception as e:  # pylint: disable=broad-exception-caught
                 _logger.error("Upload of %s failed, %s", f, self._error_detail(e))
                 ret = 1
                 continue
@@ -726,9 +725,8 @@ class WCIBConnection:
                 label = self._dest_label(resp_json)
                 if label is not None:
                     resp[fname] = label
-            # pylint: disable=broad-exception-caught
             # per-file failures are logged and skipped so other files still upload
-            except Exception as e:
+            except Exception as e:  # pylint: disable=broad-exception-caught
                 _logger.error("Upload of %s failed, %s", fname, self._error_detail(e))
                 ret = 1
                 continue
