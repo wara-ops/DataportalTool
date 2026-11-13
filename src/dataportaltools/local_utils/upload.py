@@ -1,5 +1,9 @@
 """HTTP client (WCIBConnection) for the WARA-Ops dataportal API."""
 
+# The user-facing error texts pushed this module just past pylint's 1000-line
+# limit; splitting the client is a separate refactor.
+# pylint: disable=too-many-lines
+
 import json
 import logging
 import os
@@ -87,18 +91,36 @@ class WCIBConnection:
         Exception of token not provided or server cannot be connected
         """
         if (self.token_file == "") and (self.token_data == ""):
-            raise WCIBError("No token provided")
+            raise WCIBError(
+                "No token provided. Pass -t <token file>, or set the "
+                "PORTAL_TOKEN environment variable to the token value."
+            )
 
         if self.token_data == "":
-            with open(self.token_file, encoding="utf-8") as f:
-                tok = f.read()
-                self.token_data = tok.strip()
+            try:
+                with open(self.token_file, encoding="utf-8") as f:
+                    tok = f.read()
+            except OSError as e:
+                raise WCIBError(
+                    f"cannot read the token file '{self.token_file}' "
+                    f"({e.strerror or e}). Check the path given with -t."
+                ) from e
+            self.token_data = tok.strip()
 
         self._s = requests.Session() if session is None else session
 
-        response = self._s.get(f"{self.url}/test", timeout=self.timeout)
+        try:
+            response = self._s.get(f"{self.url}/test", timeout=self.timeout)
+        except requests.exceptions.ConnectionError as e:
+            raise WCIBError(
+                f"cannot reach the portal at {self.url}. Check the address "
+                "(--api or PORTAL_URL) and your network connection."
+            ) from e
         if response.status_code >= 300:
-            raise WCIBError("Failed to test api")
+            raise WCIBError(
+                f"Failed to test the API at {self.url} (HTTP {response.status_code}). "
+                "Check the address given with --api or PORTAL_URL."
+            )
 
     def create_dataset(self, infofile: str, user: str, dryrun: bool) -> int:
         """
@@ -302,6 +324,12 @@ class WCIBConnection:
             body = (response.text or "").strip()
             if body:
                 msg = f"{msg} | server said: {body[:1000]}"
+            if getattr(response, "status_code", None) in (401, 403):
+                msg = (
+                    f"{msg} | Your token may have expired or may not give "
+                    "access to this dataset. Download a new token from the "
+                    "portal and pass it with -t or PORTAL_TOKEN."
+                )
         return msg
 
     # parameters mirror set_file_metadata plus the upload response
@@ -817,7 +845,11 @@ class WCIBConnection:
         all_files = list(filter(os.path.isfile, _all_files))
 
         if len(all_files) == 0:
-            _logger.info("No files found")
+            _logger.error(
+                "No files matched %s. Check the path; to match several files, "
+                "quote the wildcard (-s 'dir/*.parquet') or repeat -s per file.",
+                ", ".join(f"-s {s}" for s in src_list) or "(no -s given)",
+            )
             return 1
 
         single_file = len(all_files) == 1
@@ -851,6 +883,13 @@ class WCIBConnection:
         for src, dst in resp.items():
             print(fmt.format(src, dst))
 
+        if ok:
+            _logger.error(
+                "Finished with errors: some files were not uploaded or not "
+                "annotated (see the messages above). The table lists the "
+                "files that did upload."
+            )
+
         return ok
 
     def delete(self, datasetid: int, force: bool, dryrun: bool) -> int:
@@ -881,23 +920,23 @@ class WCIBConnection:
 
         # Unless force, we will not remove non-empty datasets
         if not force:
-            data_files = self._list_files(datasetid, False, dryrun, limit=1)
-            if data_files is None:
-                _logger.error("Failed to retrieve data files")
-                return 1
-
-            if len(data_files) > 0:
-                _logger.error("Dataset is not empty, data files exists")
-                return 1
-
-            extra_files = self._list_files(datasetid, True, dryrun, limit=1)
-            if extra_files is None:
-                _logger.error("Failed to retrieve extra files")
-                return 1
-
-            if len(extra_files) > 0:
-                _logger.error("Dataset is not empty, extra files exists")
-                return 1
+            for extra, what in ((False, "data files"), (True, "extra files")):
+                found = self._list_files(datasetid, extra, dryrun, limit=1)
+                if found is None:
+                    _logger.error(
+                        "Could not check whether dataset %d is empty, so it "
+                        "was not deleted",
+                        datasetid,
+                    )
+                    return 1
+                if len(found) > 0:
+                    _logger.error(
+                        "Dataset %d still has %s, so it was not deleted. Pass "
+                        "--force to skip this check.",
+                        datasetid,
+                        what,
+                    )
+                    return 1
 
         j = {}
         try:

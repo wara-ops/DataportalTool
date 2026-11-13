@@ -22,6 +22,14 @@ except ImportError:  # pragma: no cover - direct-script bootstrap fallback
 
 _log = logging.getLogger("base")
 
+# Bound at import so it keeps working when tests replace WCIBConnection.
+_error_detail = up.WCIBConnection._error_detail  # pylint: disable=protected-access
+
+
+def _fail(action: str, err: Exception) -> None:
+    """Tell the user on stderr that ``action`` failed, with the full reason."""
+    click.echo(f"Failed to execute {action}: {_error_detail(err)}", err=True)
+
 
 @click.command()
 @click.option(
@@ -30,17 +38,24 @@ _log = logging.getLogger("base")
     default=None,
     type=click.Path(exists=True),
     metavar="<path to description file>",
-    help="Create a new dataset using provided information Markdown file",
+    help="Create a new dataset described by this Markdown file.",
 )
-@click.option("--user", "-u", default=None, metavar="<user>", help="User name")
-@click.option("--upload", "-U", default=None, metavar="<id>", help="Dataset id")
+@click.option("--user", "-u", default=None, metavar="<user>", help="Owner name for -c.")
+@click.option(
+    "--upload",
+    "-U",
+    default=None,
+    metavar="<id>",
+    help="Upload the --src file(s) to the dataset with this id.",
+)
 @click.option(
     "--src",
     "-s",
     default=None,
     multiple=True,
-    metavar="<path1> <path2> .. <pathN>",
-    help="Source files",
+    metavar="<path or 'glob'>",
+    help="File to upload. Repeat -s for each file, or quote a wildcard so this "
+    "tool expands it (-s 'data/*.parquet').",
 )
 @click.option(
     "--prefix",
@@ -56,30 +71,37 @@ _log = logging.getLogger("base")
     "extra_file",
     is_flag=True,
     default=False,
-    help="Upload the file(s) as extra file(s) (stored verbatim, not subject to "
-    "the datafile naming convention). Required to use --prefix.",
+    help="Upload the file(s) as extra file(s), such as a README or notes, "
+    "stored unchanged. Needed for any file whose name does not follow the "
+    "data-file naming convention. Required to use --prefix.",
 )
 @click.option(
     "--delete",
     "-d",
     default=None,
     metavar="<id>",
-    help="Delete dataset with provided id",
+    help="Delete the dataset with this id. Refused while it still has files, "
+    "unless --force is given.",
 )
 @click.option(
     "--listdataset/--no-listdataset",
     "-L",
     default=False,
-    help="List users all datasets",
+    help="List all your datasets.",
 )
 @click.option(
     "--listfiles",
     "-l",
     default=None,
     metavar="<id>",
-    help="List objects in specified dataset",
+    help="List the files in the dataset with this id.",
 )
-@click.option("--dryrun/--no-dryrun", default=False, help="Dry run")
+@click.option(
+    "--dryrun/--no-dryrun",
+    default=False,
+    help="Show what would be done without changing anything on the portal. "
+    "Add -v to see the details of each request.",
+)
 @click.option(
     "--token",
     "-t",
@@ -102,23 +124,34 @@ _log = logging.getLogger("base")
 @click.option(
     "--start",
     default="",
-    help="Timestamp of first event in file, YYYY-MM-ddThh:mm:ss[.uuu], "
-    "e.g. 2022-12-26T00:00:00",
+    help="Time of the first event, YYYY-MM-ddThh:mm:ss[.uuu], e.g. "
+    "2022-12-26T00:00:00. With --stop, --count, --flag, --kind and --dtype "
+    "(metric) or --size (log), lets a single file whose name does not follow "
+    "the convention be uploaded as a data file; also used by --rename.",
 )
-@click.option("--stop", default="", help="Timestamp of last event in file")
-@click.option("--count", default=0, help="Number of events in the file")
+@click.option("--stop", default="", help="Time of the last event (see --start).")
+@click.option("--count", default=0, help="Number of events in the file (see --start).")
 @click.option(
     "--flag",
     default="",
     help="Data file description, e.g., 'preprocessed-and-anonymized', 'raw', 'filtered', ...",
 )
 @click.option(
-    "--dtype", default="", help="Data type description, e.g., 'float', 'int', 'json'"
+    "--dtype", default="", help="Value type of a metric, e.g., 'float', 'int', 'json'"
 )
-@click.option("--size", default="", help="Uncompressed file size (only log files)")
-@click.option("--kind", default="", help='Kind of data, either "log" or "metric"')
 @click.option(
-    "--force/--no-force", default=False, help="Force action (whan action is 'delete')"
+    "--size", default="", help="Uncompressed file size (required for log files)"
+)
+@click.option(
+    "--kind",
+    default="",
+    help='Kind of data, "log" or "metric". Needed when the name is built from '
+    "--start/--stop/--count, and by --rename.",
+)
+@click.option(
+    "--force/--no-force",
+    default=False,
+    help="With --delete, delete the dataset even if it still has files.",
 )
 @click.option(
     "--tag",
@@ -151,13 +184,19 @@ _log = logging.getLogger("base")
     default=None,
     type=click.Path(exists=True),
     metavar="<file>",
-    help="Derive a naming-convention filename from a data file (reads the data "
-    "to get count/start/stop). Requires --name and --kind; use --dtype/--flag/"
-    "--size for the parts that cannot be inferred. Prints the new name; pass "
-    "--apply to also normalize column dtypes and rewrite the file as the "
-    "preferred parquet+zstd form on disk.",
+    help="Suggest a naming-convention filename for a local data file (.csv, "
+    ".parquet or .pkl, optionally .gz/.bz2/.zst), using its row count and "
+    "first/last timestamp. Offline; no token needed. Requires --name and "
+    "--kind; give --dtype (metric) or --size (log). By default it only prints "
+    "the name and does not touch the file; add --apply to write a converted "
+    "copy.",
 )
-@click.option("--name", default="", metavar="<name>", help="Series name for --rename.")
+@click.option(
+    "--name",
+    default="",
+    metavar="<name>",
+    help="Series name for --rename (no '_' or '.').",
+)
 @click.option(
     "--tscol",
     default=None,
@@ -167,9 +206,9 @@ _log = logging.getLogger("base")
 @click.option(
     "--apply/--no-apply",
     default=False,
-    help="With --rename, write a normalized parquet+zstd file (coercing "
-    "columns int->float->text) named per the convention; warns about columns "
-    "left as text. Without it, only the suggested name is printed.",
+    help="With --rename, write a new parquet+zstd file named per the "
+    "convention next to the original (the original is kept), converting text "
+    "columns to numbers where possible and listing those left as text.",
 )
 @click.option(
     "--verbose",
@@ -215,7 +254,25 @@ def main(
     # number of options/branches maps directly onto the documented commands.
     # pylint: disable=too-many-arguments,too-many-positional-arguments
     # pylint: disable=too-many-locals,too-many-branches,too-many-statements
-    """Dispatch a single dataportal operation based on the given options."""
+    """Upload, annotate, list and delete datasets in the WARA-Ops data portal.
+
+    Each call does one thing, chosen by the option you give. Portal commands
+    need a token: pass -t <token file> or set PORTAL_TOKEN.
+
+    \b
+    Examples:
+      dataportaltools -L                         list your datasets
+      dataportaltools -l 17                      list the files in dataset 17
+      dataportaltools -U 17 -s 'data/*.zst.parquet' --dryrun -v
+                                                 preview an upload
+      dataportaltools -U 17 -s README.md -e      upload an extra file
+      dataportaltools --rename raw.csv --name cpu --kind metric --dtype float
+                                                 suggest a convention name
+
+    Data files must be named per the naming convention (see the README);
+    anything else needs -e/--extra-file. Exit status is 0 on success and 1 if
+    anything failed, including a batch where only some files were uploaded.
+    """
 
     utils.configure_logging(verbose)
 
@@ -230,37 +287,55 @@ def main(
             raise click.UsageError("--rename requires --name and --kind")
         if apply:
             # Normalize column dtypes and write the preferred parquet+zstd form.
-            ok, out_path, review = utils.convert_and_rename(
-                rename,
-                name=name,
-                kind=kind,
-                dtype=dtype,
-                flag=flag or "raw",
-                size=size,
-                timestamp_col=tscol,
-            )
+            try:
+                ok, out_path, review = utils.convert_and_rename(
+                    rename,
+                    name=name,
+                    kind=kind,
+                    dtype=dtype,
+                    flag=flag or "raw",
+                    size=size,
+                    timestamp_col=tscol,
+                )
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                # pandas/pyarrow raise many types for unreadable input; turn
+                # any of them into a message instead of a traceback.
+                click.echo(f"Failed to convert/rename {rename}: {e}", err=True)
+                ctx.exit(1)
             if not ok:
-                print("Failed to convert/rename the file (see log for details)")
+                click.echo(
+                    f"Failed to convert/rename {rename} (see the message above)",
+                    err=True,
+                )
                 ctx.exit(1)
             if review:
-                print(
+                click.echo(
                     "Review: could not infer a numeric type for column(s): "
                     + ", ".join(review)
-                    + " (left as text)"
+                    + " (left as text)",
+                    err=True,
                 )
             print(out_path)
         else:
-            ok, new_name = utils.rename_from_data(
-                rename,
-                name=name,
-                kind=kind,
-                dtype=dtype,
-                flag=flag or "raw",
-                size=size,
-                timestamp_col=tscol,
-            )
+            try:
+                ok, new_name = utils.rename_from_data(
+                    rename,
+                    name=name,
+                    kind=kind,
+                    dtype=dtype,
+                    flag=flag or "raw",
+                    size=size,
+                    timestamp_col=tscol,
+                )
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                # Same boundary as above, for the read-only path.
+                click.echo(f"Failed to build a name from {rename}: {e}", err=True)
+                ctx.exit(1)
             if not ok:
-                print("Failed to build a name from the data (see log for details)")
+                click.echo(
+                    f"Failed to build a name from {rename} (see the message above)",
+                    err=True,
+                )
                 ctx.exit(1)
             print(new_name)
         ctx.exit(0)
@@ -277,7 +352,7 @@ def main(
         wc.connect()
     except Exception as e:  # pylint: disable=broad-exception-caught
         # Top-level CLI boundary: report any failure and exit non-zero.
-        print(f"Failed to connect: {e}")
+        click.echo(f"Failed to connect: {e}", err=True)
         ok = False
 
     if not ok:
@@ -332,14 +407,14 @@ def main(
                 "--listfiles <datasetid> for the dataset id"
             )
         if tags is None and pois is None:
-            print("Nothing to do: --setmeta needs --tag and/or --poi")
+            click.echo("Nothing to do: --setmeta needs --tag and/or --poi", err=True)
             ctx.exit(0)
         try:
             datasetid = int(upload) if upload is not None else int(listfiles)
             wc.set_file_metadata(datasetid, setmeta, tags, pois, dryrun)
         except Exception as e:  # pylint: disable=broad-exception-caught
             # CLI boundary: surface any operation failure as a non-zero exit.
-            print(f"Failed to execute: {e}")
+            _fail("the annotation", e)
             ret = 1
 
         ctx.exit(ret)
@@ -349,7 +424,7 @@ def main(
             ret = wc.create_dataset(createdataset, user, dryrun)
         except Exception as e:  # pylint: disable=broad-exception-caught
             # CLI boundary: surface any operation failure as a non-zero exit.
-            print(f"Failed to execute: {e}")
+            _fail("the dataset creation", e)
             ret = 1
 
         ctx.exit(ret)
@@ -381,7 +456,7 @@ def main(
                 ret = 1
         except Exception as e:  # pylint: disable=broad-exception-caught
             # CLI boundary: surface any operation failure as a non-zero exit.
-            print(f"Failed to execute: {e}")
+            _fail("the upload", e)
             ret = 1
 
         ctx.exit(ret)
@@ -392,7 +467,7 @@ def main(
             ret = wc.delete(datasetid, force, dryrun)
         except Exception as e:  # pylint: disable=broad-exception-caught
             # CLI boundary: surface any operation failure as a non-zero exit.
-            print(f"Failed to execute: {e}")
+            _fail("the delete", e)
             ret = 1
 
         ctx.exit(ret)
@@ -402,7 +477,7 @@ def main(
             ret = wc.list_datasets(dryrun)
         except Exception as e:  # pylint: disable=broad-exception-caught
             # CLI boundary: surface any operation failure as a non-zero exit.
-            print(f"Failed to execute: {e}")
+            _fail("the dataset listing", e)
             ret = 1
 
         ctx.exit(ret)
@@ -413,11 +488,16 @@ def main(
             ret = wc.list_files(datasetid, dryrun)
         except Exception as e:  # pylint: disable=broad-exception-caught
             # CLI boundary: surface any operation failure as a non-zero exit.
-            print(f"Failed to execute: {e}")
+            _fail("the file listing", e)
             ret = 1
 
         ctx.exit(ret)
 
+    click.echo(
+        "Nothing to do: give an action such as -L, -l <id>, -U <id> -s <file>, "
+        "-c <file>, -d <id> or --rename <file>. See --help.",
+        err=True,
+    )
     ctx.exit()
 
 

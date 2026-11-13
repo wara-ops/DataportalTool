@@ -24,6 +24,8 @@ def configure_logging(verbose: int = 0) -> None:
       * the default (WARNING) -- only warnings and errors are shown.
 
     Installs a basic stderr handler once so the chosen level actually prints.
+    Messages are shown as ``ERROR: <text>`` rather than with the internal
+    logger name, since most of them are meant for the person running the tool.
     """
     if verbose >= 2:
         level = logging.DEBUG
@@ -35,7 +37,7 @@ def configure_logging(verbose: int = 0) -> None:
         if not isinstance(level, int):
             level = _DEFAULT_LEVEL
 
-    logging.basicConfig(level=level)
+    logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
     logging.getLogger("toolslib").setLevel(level)
 
 
@@ -469,9 +471,11 @@ def drop_oversized(files: list[str]) -> tuple[list[str], list[str]]:
         nbytes = os.path.getsize(f)
         if nbytes > MAX_FILE_BYTES:
             _logger.error(
-                "Skipping %s: %d bytes exceeds the portal limit of %d bytes. "
-                "Split the file by time window and upload the parts.",
+                "Skipped %s: it is %.2f GiB (%d bytes), over the portal limit of "
+                "%d bytes (one byte under 2 GiB). Split the file by time window "
+                "into smaller files and upload those.",
                 f,
+                nbytes / 2**30,
                 nbytes,
                 MAX_FILE_BYTES,
             )
@@ -491,16 +495,21 @@ def accept_datafile(fname: str, kind: str, filedata: dict) -> bool:
     if kind == "extra":
         _logger.error(
             "Rejected %s: the name does not follow the naming convention "
-            "(see wcib/docs/namingconvention.md). Rename it, or pass "
-            "-e/--extra-file to upload it as an extra file.",
+            "(see 'Naming convention' in the README). Either rename it "
+            "(--rename suggests a name), or, for a single file, describe it "
+            "with --kind, --start, --stop, --count, --flag and --dtype (metric) "
+            "or --size (log) so the name is built for you, or pass "
+            "-e/--extra-file to upload it unchanged as an extra file.",
             fname,
         )
         return False
 
     if is_plain_pickle(filedata):
         _logger.error(
-            "Rejected %s: plain .pkl is retired for new uploads. Compress it "
-            "to .pkl.zst, or convert it with --rename --apply.",
+            "Rejected %s: plain .pkl is retired for new uploads (uncompressed "
+            "pickles are no longer accepted). Compress it to .pkl.zst (for "
+            "example 'zstd <file>') and upload that, or convert it to parquet "
+            "with --rename --apply.",
             fname,
         )
         return False
@@ -543,8 +552,11 @@ def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
     ------
     """
     if kind not in ["metric", "log"]:
-        _logger.error(
-            "create_filename, cannot build a name without a valid 'kind', got '%s'",
+        # No --kind at all is the normal case for a file whose name already
+        # follows the convention, so only a wrong value is worth an error.
+        report = _logger.debug if kind == "" else _logger.error
+        report(
+            "Cannot build a file name: --kind must be 'metric' or 'log', got '%s'",
             kind,
         )
         return False, ""
@@ -569,7 +581,12 @@ def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
 
     # Sanity check
     if stop_o < start_o:
-        _logger.error("Stop time is earlier than start time")
+        _logger.error(
+            "The stop time (%s) is earlier than the start time (%s); "
+            "check --start and --stop",
+            stop,
+            start,
+        )
         return False, ""
 
     # See wcib/docs/namingconvention.md for the metric and log field layouts.
@@ -606,11 +623,14 @@ def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
 
     if kind == "log":
         if size == "":
-            _logger.error("Log file missing size parameter")
+            _logger.error("A log file name needs the uncompressed size: pass --size")
             return False, ""
 
         if compression == "":
-            _logger.error("Log file is not compressed")
+            _logger.error(
+                "Log files must be compressed (.gz, .bz2 or .zst); "
+                "compress the file and try again"
+            )
             return False, ""
 
         # Without a datatype only the compression method is part of a log name,
@@ -624,7 +644,10 @@ def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
 
     if kind == "metric":
         if datatype == "":
-            _logger.error("Metric file is missing datatype")
+            _logger.error(
+                "A metric file name needs a value type: pass --dtype "
+                "(for example --dtype float)"
+            )
             return False, ""
 
         datatype = _pretty(datatype)
@@ -659,13 +682,24 @@ def _read_dataframe(path: str) -> object:
     raise ValueError(f"Unsupported file format for '{path}' (use csv/parquet/pkl)")
 
 
+_BAD_NAME_MSG = (
+    "--name must not contain '_' or '.' (got '%s'): those characters separate "
+    "the parts of a convention name. Use '-' instead."
+)
+_NO_ROWS_MSG = "%s has no data rows, so there is nothing to name"
+_NO_TIMES_MSG = (
+    "No valid timestamps in column '%s'; pick the timestamp column with --tscol"
+)
+
+
 def _detect_timestamp_column(frame: object, timestamp_col: Optional[str]) -> str:
     """Return the timestamp column name, validating or auto-detecting it."""
     columns = list(frame.columns)
     if timestamp_col is not None:
         if timestamp_col not in columns:
             raise ValueError(
-                f"Timestamp column '{timestamp_col}' not found; columns: {columns}"
+                f"Timestamp column '{timestamp_col}' not found; the file has "
+                f"columns {columns}. Pass one of them with --tscol."
             )
         return timestamp_col
 
@@ -724,19 +758,19 @@ def rename_from_data(
     import pandas as pd  # pylint: disable=import-outside-toplevel
 
     if "_" in name or "." in name:
-        _logger.error("rename_from_data, name must not contain '_' or '.': '%s'", name)
+        _logger.error(_BAD_NAME_MSG, name)
         return False, ""
 
     frame = _read_dataframe(path)
     count = len(frame)
     if count <= 0:
-        _logger.error("rename_from_data, '%s' has no rows", path)
+        _logger.error(_NO_ROWS_MSG, path)
         return False, ""
 
     col = _detect_timestamp_column(frame, timestamp_col)
     times = pd.to_datetime(frame[col], errors="coerce", utc=True).dropna()
     if times.empty:
-        _logger.error("rename_from_data, no valid timestamps in column '%s'", col)
+        _logger.error(_NO_TIMES_MSG, col)
         return False, ""
 
     data = {
@@ -823,20 +857,18 @@ def convert_and_rename(
     import pandas as pd  # pylint: disable=import-outside-toplevel
 
     if "_" in name or "." in name:
-        _logger.error(
-            "convert_and_rename, name must not contain '_' or '.': '%s'", name
-        )
+        _logger.error(_BAD_NAME_MSG, name)
         return False, "", []
 
     frame = _read_dataframe(path)
     if len(frame) <= 0:
-        _logger.error("convert_and_rename, '%s' has no rows", path)
+        _logger.error(_NO_ROWS_MSG, path)
         return False, "", []
 
     col = _detect_timestamp_column(frame, timestamp_col)
     times = pd.to_datetime(frame[col], errors="coerce", utc=True).dropna()
     if times.empty:
-        _logger.error("convert_and_rename, no valid timestamps in '%s'", col)
+        _logger.error(_NO_TIMES_MSG, col)
         return False, "", []
 
     object_cols = normalize_dataframe(frame, skip_cols=[col])
@@ -862,9 +894,9 @@ def convert_and_rename(
     written = os.path.getsize(out_path)
     if written > MAX_FILE_BYTES:
         _logger.error(
-            "convert_and_rename, '%s' is %d bytes, over the portal limit of %d "
-            "bytes; removed it. Split the source by time window and convert the "
-            "parts separately.",
+            "The converted file %s is %d bytes, over the portal limit of %d "
+            "bytes, so it was removed. Split the source by time window and "
+            "convert the parts separately.",
             out_path,
             written,
             MAX_FILE_BYTES,

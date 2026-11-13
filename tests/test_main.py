@@ -503,3 +503,109 @@ def test_no_extra_flag_routes_datafile(runner, mocker, tmp_path):
     result = runner.invoke(main, ["-U", "1", "-s", str(f)])
     assert result.exit_code == 0
     assert instance.upload.call_args.kwargs["extra"] is False
+
+
+# --------------------------------------------------------------------------- #
+# user-facing output: stderr, tracebacks, help
+# --------------------------------------------------------------------------- #
+def _rename_args(p, *extra):
+    return [
+        "--rename",
+        str(p),
+        "--name",
+        "h",
+        "--kind",
+        "metric",
+        "--dtype",
+        "float",
+    ] + list(extra)
+
+
+def test_rename_unreadable_file_gives_message_not_traceback(runner, tmp_path):
+    p = tmp_path / "corrupt.parquet"
+    p.write_text("not a parquet file")
+    result = runner.invoke(main, _rename_args(p))
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "Traceback" not in result.output
+    assert f"Failed to build a name from {p}:" in result.stderr
+
+
+def test_rename_unsupported_format_gives_message(runner, tmp_path):
+    p = tmp_path / "data.txt"
+    p.write_text("x")
+    result = runner.invoke(main, _rename_args(p))
+    assert result.exit_code == 1
+    assert "Unsupported file format" in result.stderr
+
+
+def test_rename_apply_unreadable_file_gives_message(runner, tmp_path):
+    p = tmp_path / "corrupt.parquet"
+    p.write_text("not a parquet file")
+    result = runner.invoke(main, _rename_args(p, "--apply"))
+    assert result.exit_code == 1
+    assert f"Failed to convert/rename {p}:" in result.stderr
+
+
+def test_rename_bad_tscol_gives_message(runner, tmp_path):
+    p = tmp_path / "d.csv"
+    p.write_text("ts,v\n2022-01-01T00:00:00,1\n")
+    result = runner.invoke(main, _rename_args(p, "--tscol", "nope"))
+    assert result.exit_code == 1
+    assert "--tscol" in result.stderr
+
+
+def test_rename_review_goes_to_stderr_path_to_stdout(runner, tmp_path):
+    import pandas as pd
+
+    p = tmp_path / "raw.csv"
+    pd.DataFrame(
+        {
+            "timestamp": ["2022-12-26T00:00:00Z", "2022-12-27T00:00:00Z"],
+            "label": ["a", "b"],
+        }
+    ).to_csv(p, index=False)
+    result = runner.invoke(main, _rename_args(p, "--apply"))
+    assert result.exit_code == 0
+    assert "label" in result.stderr
+    assert result.stdout.strip().endswith(".zst.parquet")
+
+
+def test_errors_go_to_stderr(runner, mocker):
+    _, instance = _patch_conn(mocker)
+    instance.connect.side_effect = Exception("nope")
+    result = runner.invoke(main, ["-L", "-t", "something"])
+    assert "Failed to connect: nope" in result.stderr
+    assert result.stdout == ""
+
+
+def test_operation_failure_includes_server_reason(runner, mocker):
+    import requests
+
+    _, instance = _patch_conn(mocker)
+    resp = mocker.MagicMock()
+    resp.text = "file is not READY"
+    resp.status_code = 409
+    err = requests.exceptions.HTTPError("409 Client Error: Conflict")
+    err.response = resp
+    instance.set_file_metadata.side_effect = err
+    result = runner.invoke(main, ["--setmeta", "5", "--upload", "1", "--tag", "foo"])
+    assert result.exit_code == 1
+    assert "Failed to execute the annotation" in result.stderr
+    assert "file is not READY" in result.stderr
+
+
+def test_no_action_explains_what_to_do(runner, mocker):
+    _patch_conn(mocker)
+    result = runner.invoke(main, [])
+    assert result.exit_code == 0
+    assert "Nothing to do" in result.stderr and "--help" in result.stderr
+
+
+def test_help_explains_the_tool_and_key_rules(runner):
+    out = " ".join(runner.invoke(main, ["--help"]).output.split())
+    assert "Upload, annotate, list and delete datasets" in out
+    assert "Examples:" in out
+    assert "Repeat -s for each file" in out
+    assert "does not touch the file" in out
+    assert "Exit status is 0" in out

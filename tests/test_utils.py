@@ -994,3 +994,80 @@ def test_accept_datafile_logs_reasons(caplog):
     assert "plain .pkl is retired" in caplog.text
     assert "--rename --apply" in caplog.text
     assert "-e/--extra-file" in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# user-facing messages
+# --------------------------------------------------------------------------- #
+def test_configure_logging_uses_plain_format(mocker, _restore_logging):
+    basic = mocker.patch.object(utils.logging, "basicConfig")
+    utils.configure_logging(0)
+    assert basic.call_args.kwargs["format"] == "%(levelname)s: %(message)s"
+
+
+def test_create_filename_missing_kind_is_not_an_error(caplog):
+    # A convention-named file uploaded without --kind must not print an error.
+    with caplog.at_level(logging.DEBUG, logger="toolslib.utils"):
+        assert utils.create_filename({}, "x.csv", "") == (False, "")
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert "--kind must be 'metric' or 'log'" in caplog.text
+
+
+def test_create_filename_wrong_kind_is_an_error(caplog):
+    with caplog.at_level(logging.ERROR, logger="toolslib.utils"):
+        assert utils.create_filename({}, "x.csv", "metrics") == (False, "")
+    assert "--kind must be 'metric' or 'log', got 'metrics'" in caplog.text
+
+
+def test_create_filename_messages_name_the_flag(caplog):
+    base = {"dataflag": "raw", "start": "2022-12-26T00:00:00", "count": 1}
+    with caplog.at_level(logging.ERROR, logger="toolslib.utils"):
+        utils.create_filename(
+            {**base, "stop": "2022-12-27T00:00:00"}, "x.csv", "metric"
+        )
+        utils.create_filename(
+            {**base, "stop": "2022-12-27T00:00:00"}, "x.csv.gz", "log"
+        )
+        utils.create_filename(
+            {**base, "stop": "2022-12-27T00:00:00", "size": "9"}, "x.csv", "log"
+        )
+        utils.create_filename(
+            {**base, "stop": "2022-12-25T00:00:00"}, "x.csv", "metric"
+        )
+    assert "pass --dtype" in caplog.text
+    assert "pass --size" in caplog.text
+    assert "must be compressed" in caplog.text
+    assert "check --start and --stop" in caplog.text
+
+
+def test_drop_oversized_message_is_human_readable(tmp_path, monkeypatch, caplog):
+    f = tmp_path / "big.bin"
+    f.write_bytes(b"x")
+    monkeypatch.setattr(utils.os.path, "getsize", lambda _p: 3 * 2**30)
+    with caplog.at_level(logging.ERROR, logger="toolslib.utils"):
+        utils.drop_oversized([str(f)])
+    assert f"Skipped {f}" in caplog.text and "3.00 GiB" in caplog.text
+
+
+def test_accept_datafile_names_the_single_file_flags(caplog):
+    with caplog.at_level(logging.ERROR, logger="toolslib.utils"):
+        utils.accept_datafile("notes.csv", "extra", {})
+    assert "--kind" in caplog.text and "--rename" in caplog.text
+
+
+def test_rename_messages_do_not_leak_function_names(tmp_path, caplog):
+    p = tmp_path / "d.csv"
+    p.write_text("timestamp\n2022-12-26T00:00:00Z\n", encoding="utf-8")
+    with caplog.at_level(logging.ERROR, logger="toolslib.utils"):
+        utils.rename_from_data(str(p), name="a_b", kind="metric", dtype="float")
+        utils.convert_and_rename(str(p), name="a.b", kind="metric", dtype="float")
+    assert "rename_from_data" not in caplog.text
+    assert "convert_and_rename" not in caplog.text
+    assert "--name must not contain" in caplog.text and "Use '-'" in caplog.text
+
+
+def test_timestamp_column_error_suggests_tscol():
+    import pandas as pd
+
+    with pytest.raises(ValueError, match="--tscol"):
+        utils._detect_timestamp_column(pd.DataFrame({"a": [1]}), "nope")

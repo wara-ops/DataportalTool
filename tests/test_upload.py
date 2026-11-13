@@ -38,7 +38,7 @@ def test_connect_failed_test_api_raises():
     wc = WCIBConnection("http://x/v1", token="tok")
     sess = MagicMock()
     sess.get.return_value.status_code = 500
-    with pytest.raises(WCIBError, match="Failed to test api"):
+    with pytest.raises(WCIBError, match="Failed to test the API"):
         wc.connect(session=sess)
 
 
@@ -1240,3 +1240,111 @@ def test_upload_data_files_response_without_path_still_succeeds(tmp_path, mocker
     sess.put.assert_called_once()
     assert sess.put.call_args.args[0] == "http://x/v1/dataset/1/files/5"
     assert resp == {}
+
+
+# --------------------------------------------------------------------------- #
+# user-facing messages: connection, auth, empty match, partial batches
+# --------------------------------------------------------------------------- #
+def test_connect_no_token_says_how_to_provide_one():
+    wc = WCIBConnection("http://x/v1")
+    with pytest.raises(WCIBError) as exc:
+        wc.connect()
+    assert "-t <token file>" in str(exc.value) and "PORTAL_TOKEN" in str(exc.value)
+
+
+def test_connect_missing_token_file_is_explained(tmp_path):
+    missing = tmp_path / "nope.token"
+    wc = WCIBConnection("http://x/v1", tokenfile=str(missing))
+    with pytest.raises(WCIBError, match="cannot read the token file") as exc:
+        wc.connect(session=MagicMock())
+    assert str(missing) in str(exc.value) and "-t" in str(exc.value)
+
+
+def test_connect_unreachable_portal_is_explained():
+    wc = WCIBConnection("http://x/v1", token="tok")
+    sess = MagicMock()
+    sess.get.side_effect = requests.exceptions.ConnectionError("refused")
+    with pytest.raises(WCIBError, match="cannot reach the portal at http://x/v1"):
+        wc.connect(session=sess)
+
+
+def test_connect_failed_test_api_names_url_and_status():
+    wc = WCIBConnection("http://x/v1", token="tok")
+    sess = MagicMock()
+    sess.get.return_value.status_code = 404
+    with pytest.raises(WCIBError, match=r"http://x/v1 \(HTTP 404\)"):
+        wc.connect(session=sess)
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_error_detail_auth_failure_suggests_new_token(code):
+    resp = MagicMock()
+    resp.text = "unauthorized"
+    resp.status_code = code
+    err = requests.exceptions.HTTPError(f"{code} Client Error")
+    err.response = resp
+    detail = WCIBConnection._error_detail(err)
+    assert "unauthorized" in detail
+    assert "token may have expired" in detail and "PORTAL_TOKEN" in detail
+
+
+def test_error_detail_other_status_has_no_token_hint():
+    resp = MagicMock()
+    resp.text = "nope"
+    resp.status_code = 500
+    err = requests.exceptions.HTTPError("500 Server Error")
+    err.response = resp
+    assert "token" not in WCIBConnection._error_detail(err)
+
+
+def test_upload_no_files_is_reported(mocker, caplog):
+    wc, _ = _connected()
+    mocker.patch.object(upload.utils, "get_all_src_files", return_value=[])
+    with caplog.at_level("ERROR", logger="toolslib.upload"):
+        assert wc.upload(1, ["nomatch*"], {}, "", "metric", False) == 1
+    assert "No files matched -s nomatch*" in caplog.text
+    assert "quote the wildcard" in caplog.text
+
+
+def test_upload_without_src_is_reported(caplog):
+    wc, _ = _connected()
+    with caplog.at_level("ERROR", logger="toolslib.upload"):
+        assert wc.upload(1, [], {}, "", "metric", False) == 1
+    assert "(no -s given)" in caplog.text
+
+
+def test_upload_partial_failure_prints_summary(tmp_path, mocker, caplog):
+    wc, _ = _connected()
+    f = tmp_path / "file.bin"
+    f.write_bytes(b"data")
+    mocker.patch.object(wc, "_upload_extra_files", return_value=(1, {}))
+    with caplog.at_level("ERROR", logger="toolslib.upload"):
+        assert wc.upload(1, [str(f)], {}, "", "", False, extra=True) == 1
+    assert "Finished with errors" in caplog.text
+
+
+def test_upload_success_prints_no_summary(tmp_path, mocker, caplog):
+    wc, _ = _connected()
+    f = tmp_path / "file.bin"
+    f.write_bytes(b"data")
+    mocker.patch.object(wc, "_upload_extra_files", return_value=(0, {str(f): "d"}))
+    with caplog.at_level("ERROR", logger="toolslib.upload"):
+        assert wc.upload(1, [str(f)], {}, "", "", False, extra=True) == 0
+    assert "Finished with errors" not in caplog.text
+
+
+def test_delete_refusal_names_dataset_and_force(mocker, caplog):
+    wc, _ = _connected()
+    mocker.patch.object(wc, "_list_files", side_effect=[[], [{"FileID": 2}]])
+    with caplog.at_level("ERROR", logger="toolslib.upload"):
+        assert wc.delete(7, False, False) == 1
+    assert "Dataset 7 still has extra files" in caplog.text
+    assert "--force" in caplog.text
+
+
+def test_delete_check_failure_is_explained(mocker, caplog):
+    wc, _ = _connected()
+    mocker.patch.object(wc, "_list_files", return_value=None)
+    with caplog.at_level("ERROR", logger="toolslib.upload"):
+        assert wc.delete(7, False, False) == 1
+    assert "Could not check whether dataset 7 is empty" in caplog.text
