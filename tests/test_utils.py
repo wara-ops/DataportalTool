@@ -712,3 +712,242 @@ def test_convert_and_rename_create_filename_fails(tmp_path):
     ok, out, _ = utils.convert_and_rename(str(p), name="h", kind="metric", dtype="")
     assert not ok and out == ""
     assert not list(tmp_path.glob("*.zst.parquet"))
+
+
+# --- create_filename: log parquet regression and tail parsing ---------------
+
+
+def test_create_filename_log_parquet_without_datatype_keeps_zst_parquet():
+    # Regression: a plain parquet log with no datatype once came out `.zst`.
+    ok, name = utils.create_filename(
+        {**_LOG_BASE, "size": "8G"}, "x.zst.parquet", "log"
+    )
+    assert ok
+    assert name.endswith("_8G_raw.zst.parquet")
+
+
+def test_create_filename_log_non_parquet_without_datatype_unchanged():
+    ok, name = utils.create_filename({**_LOG_BASE, "size": "8G"}, "x.json.gz", "log")
+    assert ok
+    assert name.endswith("_8G_raw.gz")
+
+
+@pytest.mark.parametrize(
+    ("fname", "expected_base", "expected_tail"),
+    [
+        # dots in the base must not eat the real compression
+        ("x.a.csv.gz", "x-a", "raw.csv.gz"),
+        ("dump.2024.csv.gz", "dump-2024", "raw.csv.gz"),
+        ("my.series.zst.parquet", "my-series", "raw.zst.parquet"),
+        # directories are ignored
+        ("/tmp/a.b/x.csv.gz", "x", "raw.csv.gz"),
+        # zstd is always spelled zst
+        ("x.pkl.zstd", "x", "raw.pkl.zst"),
+        ("x.csv.zstd", "x", "raw.csv.zst"),
+        ("x.zstd", "x", "raw.zst"),
+        ("x.zstd.parquet", "x", "raw.zst.parquet"),
+        # matching is case-insensitive and the output is lowercase
+        ("x.PARQUET.ZST", "x", "raw.zst.parquet"),
+        ("x.csv.ZSTD", "x", "raw.csv.zst"),
+        ("X.CSV.GZ", "X", "raw.csv.gz"),
+        ("x.csv.BZ2", "x", "raw.csv.bz2"),
+    ],
+)
+def test_create_filename_tail_parsing(fname, expected_base, expected_tail):
+    ok, name = utils.create_filename(dict(_METRIC_BASE), fname, "metric")
+    assert ok
+    assert name.startswith(f"{expected_base}_float_")
+    assert name.endswith(f"_{expected_tail}")
+
+
+@pytest.mark.parametrize("fname", ["x", ".csv", "x.", ""])
+def test_create_filename_rejects_unparseable_tail(fname):
+    ok, name = utils.create_filename(dict(_METRIC_BASE), fname, "metric")
+    assert not ok and name == ""
+
+
+def test_split_name_tail():
+    assert utils.split_name_tail("a.b.csv.gz") == ("a.b", "csv", "gz")
+    assert utils.split_name_tail("a.zst.parquet") == ("a", "parquet", "zst")
+    assert utils.split_name_tail("a.parquet.zstd") == ("a", "parquet", "zst")
+    assert utils.split_name_tail("a.parquet") == ("a", "parquet", "")
+    assert utils.split_name_tail("a.ZSTD") == ("a", "zst", "")
+    assert utils.split_name_tail("noext") == ("", "", "")
+
+
+def test_rename_from_data_rejects_dot_name(tmp_path):
+    import pandas as pd
+
+    p = tmp_path / "d.csv"
+    pd.DataFrame({"timestamp": ["2022-12-26T00:00:00Z"], "v": [1]}).to_csv(
+        p, index=False
+    )
+    ok, name = utils.rename_from_data(str(p), name="a.b", kind="metric", dtype="float")
+    assert not ok and name == ""
+
+
+def test_convert_and_rename_rejects_dot_name(tmp_path):
+    import pandas as pd
+
+    p = tmp_path / "d.csv"
+    pd.DataFrame({"timestamp": ["2022-12-26T00:00:00Z"], "v": [1]}).to_csv(
+        p, index=False
+    )
+    ok, out, review = utils.convert_and_rename(
+        str(p), name="a.b", kind="metric", dtype="float"
+    )
+    assert not ok and out == "" and review == []
+    assert not list(tmp_path.glob("*.parquet"))
+
+
+def test_rename_from_data_dotted_source_path(tmp_path):
+    import pandas as pd
+
+    # Dots in the source path must not leak into the generated name.
+    p = tmp_path / "dump.2024.csv.gz"
+    pd.DataFrame({"timestamp": ["2022-12-26T00:00:00Z"], "v": [1]}).to_csv(
+        p, index=False, compression="gzip"
+    )
+    ok, name = utils.rename_from_data(str(p), name="h", kind="metric", dtype="float")
+    assert ok
+    assert name.startswith("h_float_") and name.endswith("_raw.csv.gz")
+
+
+# --- size ceiling -----------------------------------------------------------
+
+
+def test_max_file_bytes_value():
+    assert utils.MAX_FILE_BYTES == 2147483647
+
+
+def test_drop_oversized_boundary_is_inclusive(tmp_path, monkeypatch):
+    a, b, c = (tmp_path / n for n in ("a", "b", "c"))
+    for f in (a, b, c):
+        f.write_bytes(b"x")
+    sizes = {
+        str(a): utils.MAX_FILE_BYTES - 1,
+        str(b): utils.MAX_FILE_BYTES,
+        str(c): utils.MAX_FILE_BYTES + 1,
+    }
+    monkeypatch.setattr(utils.os.path, "getsize", lambda p: sizes[p])
+    keep, dropped = utils.drop_oversized([str(a), str(b), str(c)])
+    assert keep == [str(a), str(b)]
+    assert dropped == [str(c)]
+
+
+def test_drop_oversized_message_names_limit(tmp_path, monkeypatch, caplog):
+    f = tmp_path / "big"
+    f.write_bytes(b"x")
+    monkeypatch.setattr(utils.os.path, "getsize", lambda p: utils.MAX_FILE_BYTES + 1)
+    with caplog.at_level(logging.ERROR, logger="toolslib.utils"):
+        utils.drop_oversized([str(f)])
+    assert "2147483647" in caplog.text
+    assert "time window" in caplog.text
+
+
+def test_convert_and_rename_fails_when_parquet_too_big(tmp_path, monkeypatch):
+    import pandas as pd
+
+    p = tmp_path / "d.csv"
+    pd.DataFrame(
+        {"timestamp": ["2022-12-26T00:00:00Z", "2022-12-27T00:00:00Z"], "v": [1, 2]}
+    ).to_csv(p, index=False)
+    real_getsize = os.path.getsize
+    monkeypatch.setattr(
+        utils.os.path,
+        "getsize",
+        lambda q: (
+            utils.MAX_FILE_BYTES + 1 if str(q).endswith(".parquet") else real_getsize(q)
+        ),
+    )
+    ok, out, _ = utils.convert_and_rename(
+        str(p), name="h", kind="metric", dtype="float"
+    )
+    assert not ok and out == ""
+    # the unusable file is not left behind
+    assert not list(tmp_path.glob("*.parquet"))
+
+
+def test_convert_and_rename_accepts_parquet_at_limit(tmp_path, monkeypatch):
+    import pandas as pd
+
+    p = tmp_path / "d.csv"
+    pd.DataFrame(
+        {"timestamp": ["2022-12-26T00:00:00Z", "2022-12-27T00:00:00Z"], "v": [1, 2]}
+    ).to_csv(p, index=False)
+    real_getsize = os.path.getsize
+    monkeypatch.setattr(
+        utils.os.path,
+        "getsize",
+        lambda q: (
+            utils.MAX_FILE_BYTES if str(q).endswith(".parquet") else real_getsize(q)
+        ),
+    )
+    ok, out, _ = utils.convert_and_rename(
+        str(p), name="h", kind="metric", dtype="float"
+    )
+    assert ok and out.endswith(".zst.parquet")
+
+
+# --- upload name and datafile acceptance ------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("long_name", "expected"),
+    [
+        (
+            "history_float_2022-12-26T00:00:00.000_2022-12-26T00:20:21.000_10547_raw.zst.parquet",
+            "history.zst.parquet",
+        ),
+        (
+            "history_float_2022-12-26T00:00:00_2022-12-27T00:00:00_5_raw.parquet.zst",
+            "history.zst.parquet",
+        ),
+        ("h_float_2022-12-26T00:00:00_2022-12-27T00:00:00_5_raw.pkl.zst", "h.pkl.zst"),
+        ("h_float_2022-12-26T00:00:00_2022-12-27T00:00:00_5_raw.csv.ZSTD", "h.csv.zst"),
+        ("h_float_2022-12-26T00:00:00_2022-12-27T00:00:00_5_raw.csv", "h.csv"),
+        (
+            "my.series_float_2022-12-26T00:00:00_2022-12-27T00:00:00_5_raw.csv",
+            "my-series.csv",
+        ),
+        ("l_2022-12-26T00:00:00_2022-12-27T00:00:00_5_8G_raw.json.gz", "l.json.gz"),
+        ("l_2022-12-26T00:00:00_2022-12-27T00:00:00_5_8G_raw.gz", "l.gz"),
+        (
+            "l_2022-12-26T00:00:00_2022-12-27T00:00:00_5_8G_raw.zst.parquet",
+            "l.zst.parquet",
+        ),
+    ],
+)
+def test_upload_filename_is_short_and_canonical(long_name, expected):
+    kind, filedata = utils.parse_filename(long_name)
+    assert kind in ("metric", "log")
+    assert utils.upload_filename(filedata) == expected
+
+
+def test_upload_filename_without_name_is_empty():
+    assert utils.upload_filename({"ext": "csv"}) == ""
+    assert utils.upload_filename({"name": "x"}) == ""
+
+
+def test_is_plain_pickle():
+    _, plain = utils.parse_filename(
+        "h_float_2022-12-26T00:00:00_2022-12-27T00:00:00_5_raw.pkl"
+    )
+    _, packed = utils.parse_filename(
+        "h_float_2022-12-26T00:00:00_2022-12-27T00:00:00_5_raw.pkl.zst"
+    )
+    assert utils.is_plain_pickle(plain)
+    assert not utils.is_plain_pickle(packed)
+
+
+def test_accept_datafile_logs_reasons(caplog):
+    _, plain = utils.parse_filename(
+        "h_float_2022-12-26T00:00:00_2022-12-27T00:00:00_5_raw.pkl"
+    )
+    with caplog.at_level(logging.ERROR, logger="toolslib.utils"):
+        assert not utils.accept_datafile("a.pkl", "metric", plain)
+        assert not utils.accept_datafile("bad.csv", "extra", {})
+        assert utils.accept_datafile("ok.csv", "metric", {"ext": "csv"})
+    assert "plain .pkl is retired" in caplog.text
+    assert "--rename --apply" in caplog.text
+    assert "-e/--extra-file" in caplog.text

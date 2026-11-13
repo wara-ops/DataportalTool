@@ -41,7 +41,7 @@ if ! [[ -f "user01.token" ]]; then
 fi
 
 if [[ ! -f ".venv/bin/dataportaltools" ]] || [[ -n "$FORCE_REINSTALL" ]]; then
-    .venv/bin/python3 -m pip install "git+ssh://git@gitlab.internal.ericsson.com/autodc/dataportaltools.git@$DT_VERSION"
+    .venv/bin/python3 -m pip install "git+ssh://git@github.com/wara-ops/DataportalTool.git@$DT_VERSION"
 fi
 ID="20"
 # TODO: fix to get id from this call

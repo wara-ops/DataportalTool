@@ -272,6 +272,21 @@ class WCIBConnection:
         return size, h.hexdigest()
 
     @staticmethod
+    def _dest_label(resp_json: dict) -> Optional[str]:
+        """
+        Describe where an upload ended up, for the result table.
+
+        Returns the stored path, or, when the server reports ``deduplicated``
+        (identical bytes were already uploaded), a distinct "already present"
+        note so a re-upload is not mistaken for a fresh one. ``None`` when the
+        response carries no path.
+        """
+        path = resp_json.get("path", None)
+        if resp_json.get("deduplicated", False):
+            return f"already present (fileId {resp_json.get('fileId')}): {path}"
+        return path
+
+    @staticmethod
     def _error_detail(err: Exception) -> str:
         """
         Render an exception for the user, including any server response body.
@@ -455,11 +470,18 @@ class WCIBConnection:
         start = start_norm if start_ok else data["start"]
         stop = stop_norm if stop_ok else data["stop"]
 
+        # The server builds the stored name from the metadata and from this
+        # filename split on dots (first "_" token + dot-tail), so send a short
+        # "<name>.<canonical-suffix>" rather than the full convention name,
+        # whose fractional-second timestamps would break that split. Fall back
+        # to the local name when the caller supplied no parsed name.
+        upload_name = utils.upload_filename(data) or os.path.basename(fname)
+
         form = {
             "start": start,
             "stop": stop,
             "count": int(data["count"]),
-            "filename": os.path.basename(fname),
+            "filename": upload_name,
             "size": size,
         }
 
@@ -485,7 +507,7 @@ class WCIBConnection:
             pth = f"{self.url}/dataset/{datasetid}/files"
 
             with open(fname, "rb") as data_fh:
-                payload = (("data", (os.path.basename(fname), data_fh)),)
+                payload = (("data", (upload_name, data_fh)),)
                 response = self._s.post(
                     pth,
                     headers=headers,
@@ -548,9 +570,9 @@ class WCIBConnection:
 
                 _logger.debug("resp_json %s", str(resp_json))
 
-                v = resp_json.get("path", None)
-                if v is not None:
-                    resp[f] = resp_json["path"]
+                label = self._dest_label(resp_json)
+                if label is not None:
+                    resp[f] = label
             # pylint: disable=broad-exception-caught
             # per-file failures are logged and skipped so other files still upload
             except Exception as e:
@@ -582,9 +604,10 @@ class WCIBConnection:
         dryrun: bool,
         tags: Optional[list] = None,
         points_of_interest: Optional[list] = None,
+        name_from_params: Optional[bool] = None,
     ) -> tuple[int, dict]:
         """
-        Uploads an extra file
+        Uploads a data file
 
         Parameters
         ----------
@@ -602,6 +625,11 @@ class WCIBConnection:
             Tags applied to every freshly-uploaded file in the batch
         points_of_interest : list[dict] | None
             Points-of-interest applied to every freshly-uploaded file in the batch
+        name_from_params : bool | None
+            Whether the name may be constructed from the user's parameters
+            (a single-file upload). ``None`` means "when exactly one file is
+            given"; the caller passes it explicitly when it has already dropped
+            files from the batch.
 
         Returns
         -------
@@ -615,8 +643,11 @@ class WCIBConnection:
 
         send_d = {}
 
+        if name_from_params is None:
+            name_from_params = len(all_files) == 1
+
         # is a single file is uploaded, its name may be constructed from user params
-        if len(all_files) == 1:
+        if name_from_params:
             f = all_files[0]
             src_file = os.path.basename(f)
 
@@ -634,14 +665,14 @@ class WCIBConnection:
 
             # We expect kind it to be either "log" or "metric"
 
-            if kind != "extra":
+            # If the name cannot be properly parsed it is marked as "extra". Bad name!
+            if utils.accept_datafile(f, kind, filedata):
                 send_d[f] = filedata
             else:
-                # If name cannot be properly parsed, it will be marked as "extra". Bad name!
                 ret = 1
 
         # All filenames must follow naming convention
-        if len(all_files) > 1:
+        else:
             for f in all_files:
                 src_file = os.path.basename(f)
                 kind, filedata = utils.parse_filename(src_file)
@@ -650,7 +681,7 @@ class WCIBConnection:
                     "src_file %s, kind %s, filedata %s", src_file, kind, filedata
                 )
 
-                if kind != "extra":
+                if utils.accept_datafile(f, kind, filedata):
                     send_d[f] = filedata
                 else:
                     ret = 1
@@ -664,9 +695,9 @@ class WCIBConnection:
 
                 _logger.debug("resp_json %s", str(resp_json))
 
-                v = resp_json.get("path", None)
-                if v is not None:
-                    resp[fname] = resp_json["path"]
+                label = self._dest_label(resp_json)
+                if label is not None:
+                    resp[fname] = label
             # pylint: disable=broad-exception-caught
             # per-file failures are logged and skipped so other files still upload
             except Exception as e:
@@ -789,6 +820,11 @@ class WCIBConnection:
             _logger.info("No files found")
             return 1
 
+        single_file = len(all_files) == 1
+        all_files, oversized = utils.drop_oversized(all_files)
+        if len(all_files) == 0:
+            return 1
+
         # Extra files are uploaded "as is" when the caller marks them as such;
         # otherwise the files go through the datafile naming-convention path.
         if extra:
@@ -797,8 +833,17 @@ class WCIBConnection:
             )
         else:
             ok, resp = self._upload_data_files(
-                datasetid, all_files, data, kind, dryrun, tags, points_of_interest
+                datasetid,
+                all_files,
+                data,
+                kind,
+                dryrun,
+                tags,
+                points_of_interest,
+                name_from_params=single_file,
             )
+        if oversized:
+            ok = 1
 
         fmt = "{:<50} | {:<50}"
         print(fmt.format("Source", "Dest"))

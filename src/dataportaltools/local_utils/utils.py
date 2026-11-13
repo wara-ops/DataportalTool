@@ -198,7 +198,7 @@ def parse_filename(fname: str) -> tuple[str, dict]:
     """
     Inspect that ``fname`` follows the dataset naming convention.
 
-    See ``src/namingconvention.md`` for the full metric and log formats.
+    See ``wcib/docs/namingconvention.md`` for the full metric and log formats.
     A metric name has six underscore-separated fields plus a ``type`` field;
     a log name has six fields including an uncompressed ``size``.
 
@@ -369,6 +369,145 @@ def _parse_time(s: str) -> tuple[object, str]:
     return time_o, time_ts
 
 
+_COMPRESSION_TOKENS = frozenset({"gz", "bz2", "zst", "zstd"})
+
+# The portal rejects any file larger than this (a signed 32-bit size column);
+# the limit is inclusive, so exactly this many bytes is accepted.
+MAX_FILE_BYTES = 2147483647
+
+
+def _normalize_compression(token: str) -> str:
+    """Lowercase a compression token and spell zstandard ``zst``, never ``zstd``."""
+    token = token.lower()
+    return "zst" if token == "zstd" else token
+
+
+def split_name_tail(fname: str) -> tuple[str, str, str]:
+    """Split a file name into ``(base, extension, compression)``.
+
+    The name is reduced to its basename and parsed from the END, so dots inside
+    the base are harmless. The last dot-token is a compression method only when
+    it is one of gz/bz2/zst/zstd (any case, ``zstd`` normalised to ``zst``);
+    otherwise it is the format. A codec before ``parquet`` (``.zst.parquet``) is
+    reported as the compression of a ``parquet`` extension. Extension and
+    compression are lowercased; the base keeps its case. Missing parts are
+    returned as empty strings.
+    """
+    tokens = os.path.basename(fname).split(".")
+    if len(tokens) < 2:
+        return "", "", ""
+
+    last = tokens[-1].lower()
+    if len(tokens) >= 3 and last in _COMPRESSION_TOKENS:
+        return ".".join(tokens[:-2]), tokens[-2].lower(), _normalize_compression(last)
+    if len(tokens) >= 3 and last == "parquet":
+        codec = tokens[-2].lower()
+        if codec in _COMPRESSION_TOKENS:
+            return ".".join(tokens[:-2]), "parquet", _normalize_compression(codec)
+    if last in _COMPRESSION_TOKENS:
+        last = _normalize_compression(last)
+    return ".".join(tokens[:-1]), last, ""
+
+
+def format_suffix(extension: str, compression: str) -> str:
+    """Return the canonical dot-suffix for an extension/compression pair.
+
+    Plain parquet whose columns use the zstd codec is ``.zst.parquet`` (the
+    codec is inside the file, so the compression token comes first). The legacy
+    ``.parquet.zst`` is therefore rewritten; every other pair is
+    ``.<extension>.<compression>``.
+    """
+    if compression == "":
+        return f".{extension}"
+    if extension == "parquet" and compression == "zst":
+        return f".{compression}.{extension}"
+    return f".{extension}.{compression}"
+
+
+def _data_tail(filedata: dict) -> tuple[str, str]:
+    """Return the ``(extension, compression)`` implied by a parsed file name."""
+    if "ext" in filedata:  # metric: <flag>.<extension>[.<compression>]
+        parts = [filedata.get("ext", ""), filedata.get("compression", "")]
+    else:  # log: <flag>[.<type>].<compression>
+        parts = [filedata.get("type", ""), filedata.get("compression", "")]
+    _, extension, compression = split_name_tail("x." + ".".join(p for p in parts if p))
+    return extension, compression
+
+
+def is_plain_pickle(filedata: dict) -> bool:
+    """True when a parsed file name is a bare, uncompressed ``.pkl``."""
+    extension, compression = _data_tail(filedata)
+    return extension == "pkl" and compression == ""
+
+
+def upload_filename(filedata: dict) -> str:
+    """Build the short filename sent to the portal for a parsed data file.
+
+    The server derives the stored name from the metadata and from the upload
+    filename split on dots, using only the first ``_`` token and the dot-tail.
+    A full convention name (fractional timestamps contain dots) would corrupt
+    that split, so send ``<name>.<canonical-suffix>`` instead, e.g.
+    ``history.zst.parquet``. Returns ``""`` when ``filedata`` has no name or
+    tail to build it from.
+    """
+    name = filedata.get("name", "")
+    extension, compression = _data_tail(filedata)
+    if not name or not extension:
+        return ""
+    return f"{name.replace('.', '-')}{format_suffix(extension, compression)}"
+
+
+def drop_oversized(files: list[str]) -> tuple[list[str], list[str]]:
+    """Split ``files`` into ``(uploadable, oversized)`` by the portal size limit.
+
+    The portal answers 413 for anything above ``MAX_FILE_BYTES`` only after the
+    whole file has been read, hashed and sent, so refuse it up front. Each
+    oversized file is logged as an error.
+    """
+    keep, dropped = [], []
+    for f in files:
+        nbytes = os.path.getsize(f)
+        if nbytes > MAX_FILE_BYTES:
+            _logger.error(
+                "Skipping %s: %d bytes exceeds the portal limit of %d bytes. "
+                "Split the file by time window and upload the parts.",
+                f,
+                nbytes,
+                MAX_FILE_BYTES,
+            )
+            dropped.append(f)
+        else:
+            keep.append(f)
+    return keep, dropped
+
+
+def accept_datafile(fname: str, kind: str, filedata: dict) -> bool:
+    """Decide whether ``fname`` may be uploaded as a datafile, logging why not.
+
+    Rejects names that do not follow the naming convention (``kind`` is
+    ``"extra"``) and bare, uncompressed ``.pkl`` files, which are retired for
+    new uploads.
+    """
+    if kind == "extra":
+        _logger.error(
+            "Rejected %s: the name does not follow the naming convention "
+            "(see wcib/docs/namingconvention.md). Rename it, or pass "
+            "-e/--extra-file to upload it as an extra file.",
+            fname,
+        )
+        return False
+
+    if is_plain_pickle(filedata):
+        _logger.error(
+            "Rejected %s: plain .pkl is retired for new uploads. Compress it "
+            "to .pkl.zst, or convert it with --rename --apply.",
+            fname,
+        )
+        return False
+
+    return True
+
+
 def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
     # This builds a name from many independent fields and validates each one
     # with an early return, which is clearer than nesting; the resulting
@@ -433,7 +572,7 @@ def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
         _logger.error("Stop time is earlier than start time")
         return False, ""
 
-    # See src/namingconvention.md for the metric and log field layouts.
+    # See wcib/docs/namingconvention.md for the metric and log field layouts.
 
     # dataflag is also needed
     dataflag = data.get("dataflag", "")
@@ -441,26 +580,10 @@ def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
         _logger.debug("create_filename, empty dataflag")
         return False, ""
 
-    # inspect the tails
-    # fname = <base>.<extension>.<compression> ?
-    base, extension, compression = "", "", ""
+    # inspect the tail: <base>.<extension>[.<compression>] or <base>.<codec>.parquet
+    base, extension, compression = split_name_tail(fname)
 
-    tail_pattern = r"([^.]+)\.([^.]+)\.([^.]+)"
-    m = re.search(tail_pattern, fname)
-    if m is not None:
-        base = m.group(1)
-        extension = m.group(2)
-        compression = m.group(3)
-    else:
-        # fname = <base>.<extension> ?
-
-        tail_pattern = r"([^.]+)\.([^.]+)"
-        m = re.search(tail_pattern, fname)
-        if m is not None:
-            base = m.group(1)
-            extension = m.group(2)
-
-    if (base == "") or (extension == ""):
+    if (base.strip(".") == "") or (extension == ""):
         _logger.debug("create_filename, base or extension empty")
         return False, ""
 
@@ -469,21 +592,8 @@ def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
         ret = re.sub("[-]+", "-", abc)
         return ret
 
-    # Canonical spelling for zstd-compressed parquet is ``.zst.parquet``: the
-    # zstd codec lives inside the parquet columns, so there is no outer zstd
-    # wrapper and the compression token comes first. Accept the legacy
-    # ``.parquet.zst`` / ``.parquet.zstd`` spellings and normalise them.
-    if extension in ("zst", "zstd") and compression == "parquet":
-        extension, compression = "parquet", "zst"
-    elif extension == "parquet" and compression == "zstd":
-        compression = "zst"
-
     def _suffix() -> str:
-        if compression == "":
-            return f".{extension}"
-        if extension == "parquet" and compression == "zst":
-            return f".{compression}.{extension}"
-        return f".{extension}.{compression}"
+        return format_suffix(extension, compression)
 
     base = _pretty(base)
     extension = _pretty(extension)
@@ -503,10 +613,14 @@ def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
             _logger.error("Log file is not compressed")
             return False, ""
 
-        if datatype:
-            new_name = f"{base}_{start}_{stop}_{count}_{size}_{dataflag}{_suffix()}"
+        # Without a datatype only the compression method is part of a log name,
+        # except for parquet, whose canonical ``.zst.parquet`` spelling must be
+        # kept whole (the codec sits inside the file).
+        if datatype or extension == "parquet":
+            suffix = _suffix()
         else:
-            new_name = f"{base}_{start}_{stop}_{count}_{size}_{dataflag}.{compression}"
+            suffix = f".{compression}"
+        new_name = f"{base}_{start}_{stop}_{count}_{size}_{dataflag}{suffix}"
 
     if kind == "metric":
         if datatype == "":
@@ -589,7 +703,7 @@ def rename_from_data(
     path : str
         Source data file (``.csv``/``.parquet``/``.pkl``, optionally compressed).
     name : str
-        Series/source name for the ``<name>`` part (must not contain ``_``).
+        Series/source name for the ``<name>`` part (must not contain ``_`` or ``.``).
     kind : str
         ``"metric"`` or ``"log"``.
     dtype : str
@@ -609,8 +723,8 @@ def rename_from_data(
     # Lazy import: only pay the pandas import cost when renaming.
     import pandas as pd  # pylint: disable=import-outside-toplevel
 
-    if "_" in name:
-        _logger.error("rename_from_data, name must not contain '_': '%s'", name)
+    if "_" in name or "." in name:
+        _logger.error("rename_from_data, name must not contain '_' or '.': '%s'", name)
         return False, ""
 
     frame = _read_dataframe(path)
@@ -636,9 +750,8 @@ def rename_from_data(
 
     # create_filename derives base/ext/comp from the file name, so pass the
     # source basename but with the desired <name> as the base.
-    base = os.path.basename(path)
-    suffix = base[len(base.split(".")[0]) :]  # ".csv.zst" etc.
-    synthetic = f"{name}{suffix}"
+    _, extension, compression = split_name_tail(path)
+    synthetic = f"{name}{format_suffix(extension, compression)}"  # ".csv.zst" etc.
     return create_filename(data, synthetic, kind)
 
 
@@ -709,8 +822,10 @@ def convert_and_rename(
     """
     import pandas as pd  # pylint: disable=import-outside-toplevel
 
-    if "_" in name:
-        _logger.error("convert_and_rename, name must not contain '_': '%s'", name)
+    if "_" in name or "." in name:
+        _logger.error(
+            "convert_and_rename, name must not contain '_' or '.': '%s'", name
+        )
         return False, "", []
 
     frame = _read_dataframe(path)
@@ -743,4 +858,17 @@ def convert_and_rename(
     target_dir = out_dir if out_dir is not None else os.path.dirname(path)
     out_path = os.path.join(target_dir, new_name)
     frame.to_parquet(out_path, compression="zstd")
+
+    written = os.path.getsize(out_path)
+    if written > MAX_FILE_BYTES:
+        _logger.error(
+            "convert_and_rename, '%s' is %d bytes, over the portal limit of %d "
+            "bytes; removed it. Split the source by time window and convert the "
+            "parts separately.",
+            out_path,
+            written,
+            MAX_FILE_BYTES,
+        )
+        os.remove(out_path)
+        return False, "", object_cols
     return True, out_path, object_cols

@@ -918,3 +918,270 @@ def test_upload_data_normalizes_timestamps(tmp_path):
     # API requires RFC3339 date-time -> normalized with trailing Z
     assert form["start"] == "2024-01-31T21:00:00Z"
     assert form["stop"] == "2024-01-31T21:59:59Z"
+
+
+# --------------------------------------------------------------------------- #
+# short synthetic upload filename
+# --------------------------------------------------------------------------- #
+_LONG_PARQUET = (
+    "history_float_2022-12-26T00:00:00.000_2022-12-26T00:20:21.000_10547_"
+    "raw.zst.parquet"
+)
+
+
+def _post_ok(sess, payload=None):
+    resp = MagicMock()
+    resp.json.return_value = payload or {"fileId": 5, "status": "READY", "path": "p"}
+    resp.raise_for_status.return_value = None
+    sess.post.return_value = resp
+
+
+def test_upload_data_sends_short_canonical_filename(tmp_path):
+    wc, sess = _connected()
+    f = tmp_path / _LONG_PARQUET
+    f.write_bytes(b"PAR1")
+    _post_ok(sess)
+
+    _, filedata = upload.utils.parse_filename(_LONG_PARQUET)
+    wc._upload_data(1, str(f), filedata, False)
+
+    _, kwargs = sess.post.call_args
+    assert kwargs["data"]["filename"] == "history.zst.parquet"
+    # the multipart part carries the same short name
+    assert kwargs["files"][0][1][0] == "history.zst.parquet"
+
+
+def test_upload_data_dryrun_reports_short_filename(tmp_path, caplog):
+    wc, sess = _connected()
+    f = tmp_path / _LONG_PARQUET
+    f.write_bytes(b"PAR1")
+    _, filedata = upload.utils.parse_filename(_LONG_PARQUET)
+    with caplog.at_level("INFO", logger="toolslib.upload"):
+        wc._upload_data(1, str(f), filedata, True)
+    assert '"filename": "history.zst.parquet"' in caplog.text
+    sess.post.assert_not_called()
+
+
+def test_upload_end_to_end_single_file_built_from_params(tmp_path):
+    wc, sess = _connected()
+    f = tmp_path / "series.zst.parquet"
+    f.write_bytes(b"PAR1")
+    _post_ok(sess)
+
+    data = {
+        "datatype": "float",
+        "dataflag": "raw",
+        "start": "2022-12-26T00:00:00",
+        "stop": "2022-12-26T00:20:21",
+        "count": 7,
+        "size": "",
+    }
+    assert wc.upload(1, [str(f)], data, "", "metric", False) == 0
+    _, kwargs = sess.post.call_args
+    assert kwargs["data"]["filename"] == "series.zst.parquet"
+    assert kwargs["data"]["count"] == 7
+
+
+def test_upload_end_to_end_legacy_parquet_zst_is_normalised(tmp_path):
+    wc, sess = _connected()
+    f = tmp_path / "h_float_2022-12-26T00:00:00_2022-12-27T00:00:00_5_raw.parquet.zstd"
+    f.write_bytes(b"PAR1")
+    _post_ok(sess)
+    assert wc.upload(1, [str(f)], {}, "", "", False) == 0
+    _, kwargs = sess.post.call_args
+    assert kwargs["data"]["filename"] == "h.zst.parquet"
+
+
+def test_upload_extra_still_sends_verbatim_name(tmp_path):
+    wc, sess = _connected()
+    f = tmp_path / "notes.v2.txt"
+    f.write_bytes(b"hi")
+    _post_ok(sess, {"path": "metadata/notes.v2.txt"})
+    wc._upload_extra(1, str(f), "", False)
+    _, kwargs = sess.post.call_args
+    assert kwargs["data"]["filename"] == "notes.v2.txt"
+
+
+# --------------------------------------------------------------------------- #
+# size ceiling
+# --------------------------------------------------------------------------- #
+def test_upload_skips_oversized_file(tmp_path, mocker, caplog):
+    wc, sess = _connected()
+    f = tmp_path / "big.csv"
+    f.write_bytes(b"x")
+    mocker.patch.object(
+        upload.os.path, "getsize", return_value=upload.utils.MAX_FILE_BYTES + 1
+    )
+    with caplog.at_level("ERROR", logger="toolslib.utils"):
+        ret = wc.upload(1, [str(f)], {}, "", "metric", False)
+    assert ret == 1
+    sess.post.assert_not_called()
+    assert "2147483647" in caplog.text and "time window" in caplog.text
+
+
+def test_upload_oversized_extra_file_skipped(tmp_path, mocker):
+    wc, sess = _connected()
+    f = tmp_path / "big.bin"
+    f.write_bytes(b"x")
+    mocker.patch.object(
+        upload.os.path, "getsize", return_value=upload.utils.MAX_FILE_BYTES + 1
+    )
+    assert wc.upload(1, [str(f)], {}, "", "", False, extra=True) == 1
+    sess.post.assert_not_called()
+
+
+def test_upload_file_exactly_at_limit_is_accepted(tmp_path, mocker):
+    wc, sess = _connected()
+    f = tmp_path / "ok.bin"
+    f.write_bytes(b"x")
+    mocker.patch.object(
+        upload.os.path, "getsize", return_value=upload.utils.MAX_FILE_BYTES
+    )
+    mocker.patch.object(wc, "_file_size_and_key", return_value=(1, "k"))
+    _post_ok(sess, {"path": "metadata/ok.bin"})
+    assert wc.upload(1, [str(f)], {}, "", "", False, extra=True) == 0
+    sess.post.assert_called_once()
+
+
+def test_upload_oversized_in_batch_does_not_block_others(tmp_path, mocker):
+    wc, sess = _connected()
+    big = tmp_path / "big.bin"
+    small = tmp_path / "small.bin"
+    big.write_bytes(b"x")
+    small.write_bytes(b"x")
+    mocker.patch.object(
+        upload.os.path,
+        "getsize",
+        side_effect=lambda p: (
+            upload.utils.MAX_FILE_BYTES + 1 if p.endswith("big.bin") else 1
+        ),
+    )
+    mocker.patch.object(wc, "_file_size_and_key", return_value=(1, "k"))
+    _post_ok(sess, {"path": "metadata/small.bin"})
+    ret = wc.upload(1, [str(big), str(small)], {}, "", "", False, extra=True)
+    assert ret == 1  # the skipped file is reported as a failure
+    assert sess.post.call_count == 1
+    assert sess.post.call_args.kwargs["data"]["filename"] == "small.bin"
+
+
+def test_upload_oversized_sibling_does_not_trigger_name_construction(tmp_path, mocker):
+    # Two files given, one dropped: the survivor must still follow the
+    # convention on its own rather than be renamed from the CLI parameters.
+    wc, sess = _connected()
+    big = tmp_path / "big.csv"
+    keep = tmp_path / "keep.csv"
+    big.write_bytes(b"x")
+    keep.write_bytes(b"x")
+    mocker.patch.object(
+        upload.os.path,
+        "getsize",
+        side_effect=lambda p: (
+            upload.utils.MAX_FILE_BYTES + 1 if p.endswith("big.csv") else 1
+        ),
+    )
+    data = {
+        "datatype": "float",
+        "dataflag": "raw",
+        "start": "2022-12-26T00:00:00",
+        "stop": "2022-12-26T00:20:21",
+        "count": 7,
+    }
+    assert wc.upload(1, [str(big), str(keep)], data, "", "metric", False) == 1
+    sess.post.assert_not_called()  # keep.csv has a non-conforming name
+
+
+# --------------------------------------------------------------------------- #
+# plain .pkl, silent failures, deduplication
+# --------------------------------------------------------------------------- #
+def test_upload_refuses_plain_pkl(tmp_path, caplog):
+    wc, sess = _connected()
+    f = tmp_path / "h_float_2022-12-26T00:00:00_2022-12-27T00:00:00_5_raw.pkl"
+    f.write_bytes(b"x")
+    with caplog.at_level("ERROR", logger="toolslib.utils"):
+        assert wc.upload(1, [str(f)], {}, "", "", False) == 1
+    sess.post.assert_not_called()
+    assert "plain .pkl is retired" in caplog.text
+    assert ".pkl.zst" in caplog.text and "--rename --apply" in caplog.text
+
+
+def test_upload_plain_pkl_built_from_params_refused(tmp_path, caplog):
+    wc, sess = _connected()
+    f = tmp_path / "series.pkl"
+    f.write_bytes(b"x")
+    data = {
+        "datatype": "float",
+        "dataflag": "raw",
+        "start": "2022-12-26T00:00:00",
+        "stop": "2022-12-26T00:20:21",
+        "count": 7,
+    }
+    with caplog.at_level("ERROR", logger="toolslib.utils"):
+        assert wc.upload(1, [str(f)], data, "", "metric", False) == 1
+    sess.post.assert_not_called()
+    assert "plain .pkl" in caplog.text
+
+
+def test_upload_compressed_pkl_still_accepted(tmp_path):
+    wc, sess = _connected()
+    f = tmp_path / "h_float_2022-12-26T00:00:00_2022-12-27T00:00:00_5_raw.pkl.zst"
+    f.write_bytes(b"x")
+    _post_ok(sess)
+    assert wc.upload(1, [str(f)], {}, "", "", False) == 0
+    assert sess.post.call_args.kwargs["data"]["filename"] == "h.pkl.zst"
+
+
+def test_upload_rejected_name_is_logged_single(tmp_path, caplog):
+    wc, sess = _connected()
+    f = tmp_path / "notes.txt"
+    f.write_bytes(b"x")
+    with caplog.at_level("ERROR", logger="toolslib.utils"):
+        assert wc.upload(1, [str(f)], {}, "", "metric", False) == 1
+    assert str(f) in caplog.text
+    assert "naming convention" in caplog.text
+    assert "-e/--extra-file" in caplog.text
+
+
+def test_upload_rejected_name_is_logged_multi(tmp_path, caplog):
+    wc, sess = _connected()
+    a = tmp_path / "a.txt"
+    b = tmp_path / "b.txt"
+    a.write_bytes(b"x")
+    b.write_bytes(b"x")
+    with caplog.at_level("ERROR", logger="toolslib.utils"):
+        assert wc.upload(1, [str(a), str(b)], {}, "", "", False) == 1
+    assert str(a) in caplog.text and str(b) in caplog.text
+
+
+def test_upload_reports_deduplicated_distinctly(tmp_path, capsys):
+    wc, sess = _connected()
+    f = tmp_path / "h_float_2022-12-26T00:00:00_2022-12-27T00:00:00_5_raw.csv"
+    f.write_bytes(b"x")
+    _post_ok(
+        sess,
+        {"fileId": 42, "status": "READY", "path": "2022/h.csv", "deduplicated": True},
+    )
+    assert wc.upload(1, [str(f)], {}, "", "", False) == 0
+    out = capsys.readouterr().out
+    assert "already present (fileId 42)" in out
+
+
+def test_upload_fresh_file_shows_plain_path(tmp_path, capsys):
+    wc, sess = _connected()
+    f = tmp_path / "h_float_2022-12-26T00:00:00_2022-12-27T00:00:00_5_raw.csv"
+    f.write_bytes(b"x")
+    _post_ok(sess, {"fileId": 43, "status": "READY", "path": "2022/h.csv"})
+    assert wc.upload(1, [str(f)], {}, "", "", False) == 0
+    out = capsys.readouterr().out
+    assert "2022/h.csv" in out and "already present" not in out
+
+
+def test_upload_extra_reports_deduplicated(tmp_path, capsys):
+    wc, sess = _connected()
+    f = tmp_path / "n.txt"
+    f.write_bytes(b"x")
+    _post_ok(
+        sess,
+        {"fileId": 9, "path": "metadata/n.txt", "deduplicated": True},
+    )
+    assert wc.upload(1, [str(f)], {}, "", "", False, extra=True) == 0
+    assert "already present (fileId 9)" in capsys.readouterr().out

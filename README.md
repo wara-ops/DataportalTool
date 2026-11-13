@@ -26,11 +26,11 @@ The CLI ships a console script (`dataportaltools`) and can be run directly with
 uvx --from . dataportaltools --help
 
 # Straight from the git repository
-uvx --from git+https://gitlab.internal.ericsson.com/autodc/dataportaltools dataportaltools -L
+uvx --from git+https://github.com/wara-ops/DataportalTool dataportaltools -L
 
 # From a locally built wheel
 pdm build
-uvx --from ./dist/dataportaltools-0.0.1-py3-none-any.whl dataportaltools --help
+uvx --from ./dist/dataportaltools-0.1.1-py3-none-any.whl dataportaltools --help
 ```
 
 `uvx` runs the tool in a throwaway environment, so nothing is added to your
@@ -38,7 +38,7 @@ system or active virtualenv. The first run resolves and caches the dependencies
 (`requests`, `click`); later runs reuse the cache and start quickly.
 
 > **Note — picking up local changes.** `uvx --from .` caches the built package
-> keyed by its version (`0.0.1`). If you edit the source without bumping the
+> keyed by its version (`0.1.1`). If you edit the source without bumping the
 > version, `uvx` keeps serving the old build (e.g. a new flag like `-v` shows
 > `No such option`). Force a rebuild with `--refresh` (or `--no-cache`):
 >
@@ -53,7 +53,7 @@ Because `--from <source> dataportaltools` is verbose, set the source once and
 alias it for a session:
 
 ``` bash
-export DPT_SRC="git+https://gitlab.internal.ericsson.com/autodc/dataportaltools"
+export DPT_SRC="git+https://github.com/wara-ops/DataportalTool"
 alias dpt="uvx --from $DPT_SRC dataportaltools"
 ```
 
@@ -91,7 +91,8 @@ Data-file names must follow the convention
 `<name>_<type>_<start>_<stop>_<count>_<flag>.<ext>[.<comp>]` (e.g.
 `history_float_2022-12-26T00:00:00Z_2022-12-27T00:00:00Z_140190_raw.csv.zst`,
 where `start`/`stop` are UTC timestamps with a trailing `Z`); a file whose name
-does not match is uploaded as an *extra* file instead. See the
+does not match is **rejected** with an error (add `-e` to upload it as an extra
+file on purpose). See the
 [Naming convention](#naming-convention) section for the full part-by-part
 breakdown, and use `--rename` to derive a convention name from the data:
 ``` bash
@@ -201,7 +202,8 @@ the file contents), so re-running an upload de-duplicates server-side instead of
 creating a duplicate.
 
 ### Naming convention
-[See here.](./src/namingconvention.md)
+[See here.](./src/namingconvention.md), which points to the authoritative
+`wcib/docs/namingconvention.md`.
 
 ### Create a dataset
 ```sh
@@ -216,8 +218,9 @@ dataportaltools -L -t user.token
 ### Upload a file that follows the data file naming convention
 A metric file name has the form
 `<name>_<type>_<start>_<stop>_<count>_<flag>.<ext>[.<comp>]`
-(see [Naming convention](./src/namingconvention.md)); otherwise the file is
-treated as an extra file. The `start`/`stop` timestamps are UTC and carry a
+(see [Naming convention](./src/namingconvention.md)); a file whose name does
+not match is rejected with an error, and `-e` is for extra files only (see
+[Upload an extra file](#upload-an-extra-file)). The `start`/`stop` timestamps are UTC and carry a
 trailing `Z` (the canonical form the tool generates; the API validates them as
 RFC3339 `date-time`). For example:
 ```sh
@@ -233,11 +236,21 @@ where the parts of `history_float_2022-12-26T00:00:00Z_2022-12-27T00:00:00Z_1401
 | `stop` | `2022-12-27T00:00:00Z` | timestamp of the last entry (UTC, trailing `Z`) |
 | `count` | `140190` | number of entries |
 | `flag` | `raw` | data flag (`raw`, or a short descriptor) |
-| `ext` | `csv` | file format (`csv`, `pkl`, `parquet`) |
-| `comp` | `zst` | compression method (optional: `bz2`, `gz`, `zst`/`zstd`; `zstd` preferred) |
+| `ext` | `csv` | file format (`csv`, `pkl`, `parquet`); `pkl` must be compressed (`.pkl.zst`), plain `.pkl` is retired for new uploads |
+| `comp` | `zst` | compression method (optional: `bz2`, `gz`, `zst`; `zst` preferred, never `.zstd`). Plain parquet whose columns use the zstd codec is spelled `.zst.parquet` and takes no outer compression |
 
 The timestamps may be written without the `Z` and the tool will still parse the
 file, but the generated/canonical form includes it.
+
+Limits and behaviour worth knowing:
+- The portal accepts files of at most 2147483647 bytes (inclusive). Larger
+  files are skipped up front with an error; split them by time window.
+- A bare `.pkl` is refused for new uploads. Use `.pkl.zst`, or convert the file
+  with `--rename --apply`. Existing `.pkl` files can still be read and renamed.
+- The tool sends the portal a short name such as `history.zst.parquet`; the
+  portal builds the stored convention name from it and the metadata.
+- Uploading identical bytes again is reported as
+  `already present (fileId N)` instead of as a new upload.
 
 Not sure how to name a file? Let the tool derive `start`/`stop`/`count` from the
 data and build the name for you (see
