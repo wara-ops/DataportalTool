@@ -373,7 +373,7 @@ def test_rename_apply_converts_to_parquet_zstd(runner, mocker, tmp_path):
     assert result.exit_code == 0
     expected = (
         tmp_path
-        / "history_float_2022-12-26T00:00:00Z_2022-12-27T00:00:00Z_2_raw.parquet.zst"
+        / "history_float_2022-12-26T00:00:00Z_2022-12-27T00:00:00Z_2_raw.zst.parquet"
     )
     assert expected.exists()
     # Non-destructive: the source file is kept.

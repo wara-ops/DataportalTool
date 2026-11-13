@@ -469,6 +469,22 @@ def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
         ret = re.sub("[-]+", "-", abc)
         return ret
 
+    # Canonical spelling for zstd-compressed parquet is ``.zst.parquet``: the
+    # zstd codec lives inside the parquet columns, so there is no outer zstd
+    # wrapper and the compression token comes first. Accept the legacy
+    # ``.parquet.zst`` / ``.parquet.zstd`` spellings and normalise them.
+    if extension in ("zst", "zstd") and compression == "parquet":
+        extension, compression = "parquet", "zst"
+    elif extension == "parquet" and compression == "zstd":
+        compression = "zst"
+
+    def _suffix() -> str:
+        if compression == "":
+            return f".{extension}"
+        if extension == "parquet" and compression == "zst":
+            return f".{compression}.{extension}"
+        return f".{extension}.{compression}"
+
     base = _pretty(base)
     extension = _pretty(extension)
     dataflag = _pretty(dataflag)
@@ -476,6 +492,7 @@ def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
     # Uncompressed size is mandatory for logs
     size = data.get("size", "")  # needed in log name
     datatype = data.get("datatype", "")  # needed in metric name
+    new_name = ""
 
     if kind == "log":
         if size == "":
@@ -487,10 +504,7 @@ def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
             return False, ""
 
         if datatype:
-            new_name = (
-                f"{base}_{start}_{stop}_{count}_{size}_{dataflag}"
-                f".{extension}.{compression}"
-            )
+            new_name = f"{base}_{start}_{stop}_{count}_{size}_{dataflag}{_suffix()}"
         else:
             new_name = f"{base}_{start}_{stop}_{count}_{size}_{dataflag}.{compression}"
 
@@ -501,9 +515,7 @@ def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
 
         datatype = _pretty(datatype)
 
-        new_name = f"{base}_{datatype}_{start}_{stop}_{count}_{dataflag}.{extension}"
-        if compression != "":
-            new_name = f"{new_name}.{compression}"
+        new_name = f"{base}_{datatype}_{start}_{stop}_{count}_{dataflag}{_suffix()}"
 
     return True, new_name
 
@@ -688,8 +700,11 @@ def convert_and_rename(
 
     Reads ``path``, coerces non-timestamp ``object`` columns (int -> float ->
     object) via :func:`normalize_dataframe`, derives the convention name with
-    the preferred ``.parquet.zst`` form, and writes the normalized DataFrame
-    there. Returns ``(ok, out_path, object_columns)`` where ``object_columns``
+    the preferred ``.zst.parquet`` form, and writes the normalized DataFrame
+    there. The name is ``.zst.parquet`` (not ``.parquet.zst``) because the zstd
+    codec is applied inside the parquet columns; the file is plain parquet and
+    there is no outer zstd wrapper, so the compression token comes first.
+    Returns ``(ok, out_path, object_columns)`` where ``object_columns``
     lists columns the user should review.
     """
     import pandas as pd  # pylint: disable=import-outside-toplevel
@@ -719,8 +734,9 @@ def convert_and_rename(
         "count": len(frame),
         "size": size,
     }
-    # Preferred storage format per the naming convention: parquet + zstd.
-    ok, new_name = create_filename(data, f"{name}.parquet.zst", kind)
+    # Preferred storage format per the naming convention: parquet whose columns
+    # use the zstd codec, spelled ``.zst.parquet``.
+    ok, new_name = create_filename(data, f"{name}.zst.parquet", kind)
     if not ok:
         return False, "", object_cols
 

@@ -282,12 +282,12 @@ preferred **parquet + zstd** form (matching what the dataportal ingester uses):
 - each non-timestamp column is coerced `int -> float -> text` (left as text when
   no numeric type fits), and any text columns are reported so you can review
   them;
-- a new `<name>...raw.parquet.zst` file is written next to the source (the
+- a new `<name>...raw.zst.parquet` file is written next to the source (the
   original is left untouched).
 ```sh
 dataportaltools --rename ./dump.csv --name history --kind metric --dtype float --apply
 # Review: could not infer a numeric type for column(s): label (left as text)
-# -> history_float_2022-12-26T00:00:00Z_2022-12-27T00:00:00Z_140190_raw.parquet.zst
+# -> history_float_2022-12-26T00:00:00Z_2022-12-27T00:00:00Z_140190_raw.zst.parquet
 ```
 The resulting file already follows the naming convention and can be uploaded
 directly with `-U`.
@@ -364,14 +364,14 @@ DatasetID |                              DatasetName |                     Creat
 $ dataportaltools -l 1 -t /tmp/user01_token
 FileID |                      StartDate |                       StopDate |    Entries |     FileSize | MFileName
 -------+--------------------------------+--------------------------------+------------+--------------+-----------------------
-     1 |       2022-11-16T00:00:00.000Z |       2022-11-17T00:00:00.000Z |     637438 |      5521085 | history_uint_2022-11-16T00:00:00Z_2022-11-17T00:00:00Z_637438_raw.pkl.bz2
-     4 |       2022-11-17T00:00:00.000Z |       2022-11-18T00:00:00.000Z |     630806 |      5458175 | history_uint_2022-11-17T00:00:00Z_2022-11-18T00:00:00Z_630806_raw.pkl.bz2
+     1 |       2022-11-16T00:00:00.000Z |       2022-11-17T00:00:00.000Z |     637438 |      7902051 | history_2022-11-16T00:00:00_2022-11-17T00:00:00_637438.zst.parquet
+     4 |       2022-11-17T00:00:00.000Z |       2022-11-18T00:00:00.000Z |     630806 |      7830257 | history_2022-11-17T00:00:00_2022-11-18T00:00:00_630806.zst.parquet
 ...
- 99004 |       2024-01-31T21:00:00.000Z |       2024-01-31T21:59:59.000Z |     869106 |      5964930 | history_uint_2024-01-31T21:00:00Z_2024-01-31T21:59:59Z_869106_raw.pkl.bz2
- 99005 |       2024-01-31T22:00:00.000Z |       2024-01-31T22:59:59.000Z |     868935 |      5956555 | history_uint_2024-01-31T22:00:00Z_2024-01-31T22:59:59Z_868935_raw.pkl.bz2
- 99006 |       2024-01-31T23:00:00.000Z |       2024-01-31T23:59:59.000Z |     868797 |      5956084 | history_uint_2024-01-31T23:00:00Z_2024-01-31T23:59:59Z_868797_raw.pkl.bz2
+ 99004 |       2024-01-31T21:00:00.000Z |       2024-01-31T21:59:59.000Z |     869106 |      7290395 | history_uint_2024-01-31T21:00:00Z_2024-01-31T21:59:59Z_869106.zst.parquet
+ 99005 |       2024-01-31T22:00:00.000Z |       2024-01-31T22:59:59.000Z |     868935 |      7310947 | history_uint_2024-01-31T22:00:00Z_2024-01-31T22:59:59Z_868935.zst.parquet
+ 99006 |       2024-01-31T23:00:00.000Z |       2024-01-31T23:59:59.000Z |     868797 |      7293113 | history_uint_2024-01-31T23:00:00Z_2024-01-31T23:59:59Z_868797.zst.parquet
 -------+--------------------------------+--------------------------------+------------+--------------+-----------------------
- 15744 |                                |                                |            | 148268459480 |
+ 15744 |                                |                                |            | 204200036061 |
 
 
 # Create a dataset

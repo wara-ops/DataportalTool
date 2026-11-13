@@ -496,9 +496,9 @@ def test_convert_and_rename_writes_parquet_zstd(tmp_path):
         str(p), name="history", kind="metric", dtype="float"
     )
     assert ok
-    assert out_path.endswith(".parquet.zst")
+    assert out_path.endswith(".zst.parquet")
     assert os.path.basename(out_path) == (
-        "history_float_2022-12-26T00:00:00Z_2022-12-27T00:00:00Z_2_raw.parquet.zst"
+        "history_float_2022-12-26T00:00:00Z_2022-12-27T00:00:00Z_2_raw.zst.parquet"
     )
     assert review == ["label"]
     # The written file is valid parquet with coerced dtypes.
@@ -589,6 +589,49 @@ def test_create_filename_log_ok_with_datatype():
     assert "_8G_" in name
 
 
+_METRIC_BASE = {
+    "datatype": "float",
+    "dataflag": "raw",
+    "start": "1737645608",
+    "stop": "1737645609",
+    "count": 5,
+}
+
+
+def test_create_filename_metric_legacy_parquet_zst_becomes_zst_parquet():
+    ok, name = utils.create_filename(dict(_METRIC_BASE), "x.parquet.zst", "metric")
+    assert ok
+    assert name.endswith("_raw.zst.parquet")
+
+
+def test_create_filename_metric_zst_parquet_kept():
+    ok, name = utils.create_filename(dict(_METRIC_BASE), "x.zst.parquet", "metric")
+    assert ok
+    assert name.endswith("_raw.zst.parquet")
+
+
+def test_create_filename_metric_parquet_zstd_becomes_zst_parquet():
+    ok, name = utils.create_filename(dict(_METRIC_BASE), "x.parquet.zstd", "metric")
+    assert ok
+    assert name.endswith("_raw.zst.parquet")
+    assert "zstd" not in name
+
+
+def test_create_filename_log_zst_parquet_accepted():
+    ok, name = utils.create_filename(
+        {**_LOG_BASE, "size": "8G", "datatype": "float"}, "x.zst.parquet", "log"
+    )
+    assert ok
+    assert "_8G_" in name and name.endswith("_raw.zst.parquet")
+
+
+def test_create_filename_unrelated_extension_pairs_unchanged():
+    ok, name = utils.create_filename(dict(_METRIC_BASE), "x.csv.gz", "metric")
+    assert ok and name.endswith("_raw.csv.gz")
+    ok, name = utils.create_filename(dict(_METRIC_BASE), "x.pkl.zst", "metric")
+    assert ok and name.endswith("_raw.pkl.zst")
+
+
 def test_read_dataframe_pickle(tmp_path):
     import pandas as pd
 
@@ -668,4 +711,4 @@ def test_convert_and_rename_create_filename_fails(tmp_path):
     ).to_csv(p, index=False)
     ok, out, _ = utils.convert_and_rename(str(p), name="h", kind="metric", dtype="")
     assert not ok and out == ""
-    assert not list(tmp_path.glob("*.parquet.zst"))
+    assert not list(tmp_path.glob("*.zst.parquet"))
