@@ -279,6 +279,27 @@ def test_poi_multi_file_rejected(runner, mocker, tmp_path):
     assert "multi-file" in result.output
 
 
+def test_poi_single_file_upload_accepted(runner, mocker, tmp_path):
+    _, instance = _patch_conn(mocker)
+    instance.upload.return_value = 0
+    f = tmp_path / "file.csv"
+    f.write_text("data")
+    result = runner.invoke(
+        main,
+        [
+            "-U",
+            "1",
+            "-s",
+            str(f),
+            "--poi",
+            "2022-12-26T00:00:00,2022-12-26T01:00:00,t",
+        ],
+    )
+    assert result.exit_code == 0
+    pois = instance.upload.call_args.kwargs["points_of_interest"]
+    assert [p["text"] for p in pois] == ["t"]
+
+
 # --------------------------------------------------------------------------- #
 # upload threads annotations through to wc.upload
 # --------------------------------------------------------------------------- #
@@ -380,6 +401,29 @@ def test_rename_apply_converts_to_parquet_zstd(runner, mocker, tmp_path):
     assert p.exists()
     # The text column that could not be coerced is flagged for review.
     assert "label" in result.output
+
+
+def test_rename_apply_without_review_prints_only_the_path(runner, mocker, tmp_path):
+    _patch_conn(mocker)
+    p = tmp_path / "raw.csv"
+    p.write_text("timestamp,v\n2022-12-26T00:00:00Z,1\n2022-12-27T00:00:00Z,2\n")
+    result = runner.invoke(
+        main,
+        [
+            "--rename",
+            str(p),
+            "--name",
+            "history",
+            "--kind",
+            "metric",
+            "--dtype",
+            "float",
+            "--apply",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Review:" not in result.output
+    assert result.output.strip().endswith(".zst.parquet")
 
 
 def test_rename_apply_convert_failure(runner, mocker, tmp_path):

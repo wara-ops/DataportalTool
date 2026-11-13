@@ -887,6 +887,14 @@ def test_error_detail_plain_exception():
     assert WCIBConnection._error_detail(ValueError("boom")) == "boom"
 
 
+def test_error_detail_empty_response_body_is_not_appended():
+    resp = MagicMock()
+    resp.text = "  \n"
+    err = requests.exceptions.HTTPError("502 Bad Gateway")
+    err.response = resp
+    assert WCIBConnection._error_detail(err) == "502 Bad Gateway"
+
+
 def test_error_detail_no_response_body():
     err = requests.exceptions.HTTPError("500 Server Error")
     err.response = None
@@ -1185,3 +1193,50 @@ def test_upload_extra_reports_deduplicated(tmp_path, capsys):
     )
     assert wc.upload(1, [str(f)], {}, "", "", False, extra=True) == 0
     assert "already present (fileId 9)" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# a successful upload whose response carries no "path"
+# --------------------------------------------------------------------------- #
+def test_upload_extra_files_response_without_path_still_succeeds(tmp_path, mocker):
+    wc, sess = _connected()
+    f = tmp_path / "extra.bin"
+    f.write_bytes(b"data")
+    # READY extrafile with a fileId but no "path" key.
+    mocker.patch.object(
+        wc, "_upload_extra", return_value={"fileId": 7, "status": "READY"}
+    )
+    _put_ok(sess, {})
+
+    ret, resp = wc._upload_extra_files(1, [str(f)], "dir", False, tags=["x"])
+    # Success, and annotation still ran ...
+    assert ret == 0
+    sess.put.assert_called_once()
+    assert sess.put.call_args.args[0] == "http://x/v1/dataset/1/files/7"
+    # ... but there is no destination to report for the file.
+    assert resp == {}
+
+
+def test_upload_data_files_response_without_path_still_succeeds(tmp_path, mocker):
+    wc, sess = _connected()
+    f = tmp_path / "file.csv"
+    f.write_bytes(b"data")
+    mocker.patch.object(
+        upload.utils, "create_filename", return_value=(True, "long_name")
+    )
+    mocker.patch.object(
+        upload.utils, "parse_filename", return_value=("metric", _filedata())
+    )
+    # READY datafile with a fileId but no "path" key.
+    mocker.patch.object(
+        wc, "_upload_data", return_value={"fileId": 5, "status": "READY"}
+    )
+    _put_ok(sess, {})
+
+    ret, resp = wc._upload_data_files(
+        1, [str(f)], _filedata(), "metric", False, tags=["x"]
+    )
+    assert ret == 0
+    sess.put.assert_called_once()
+    assert sess.put.call_args.args[0] == "http://x/v1/dataset/1/files/5"
+    assert resp == {}

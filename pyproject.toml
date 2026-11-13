@@ -40,7 +40,12 @@ audit = "pip-audit -r requirements.txt"
 testpaths = [
     "tests"
 ]
-addopts = "--cov=dataportaltools --cov-report=term-missing --cov-fail-under=90"
+# --cov-branch is on because statement coverage alone hid untested branches
+# (a fall-through `if` that never executes its else path still counts as fully
+# covered by line coverage). With branches measured the suite is at 100%; the
+# threshold is 99 so a stray line or branch does not break the build, but a
+# real coverage regression does.
+addopts = "--cov=dataportaltools --cov-branch --cov-report=term-missing --cov-fail-under=99"
 
 [tool.coverage.run]
 source = ["dataportaltools"]

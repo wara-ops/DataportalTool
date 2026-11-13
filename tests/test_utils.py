@@ -544,6 +544,20 @@ def test_parse_info_handles_consecutive_blank_lines(tmp_path):
     assert data["tags"] == ["a", "b"]
 
 
+def test_parse_info_trailing_empty_section_is_ignored(tmp_path):
+    p = tmp_path / "info.md"
+    p.write_text("# Dataset\nDummy\n\n# Tags\n", encoding="utf-8")
+    data = utils.parse_info(str(p))
+    assert data["dataset"] == "Dummy"
+    assert data["tags"] == []
+
+
+def test_parse_info_blank_line_inside_tags_is_skipped(tmp_path):
+    p = tmp_path / "info.md"
+    p.write_text("# Tags\na, b\n\nc\n", encoding="utf-8")
+    assert utils.parse_info(str(p))["tags"] == ["a", "b", "c"]
+
+
 def test_create_filename_invalid_stop_rejected():
     data = {
         "datatype": "float",
@@ -773,6 +787,35 @@ def test_split_name_tail():
     assert utils.split_name_tail("a.parquet") == ("a", "parquet", "")
     assert utils.split_name_tail("a.ZSTD") == ("a", "zst", "")
     assert utils.split_name_tail("noext") == ("", "", "")
+
+
+def test_split_name_tail_parquet_after_non_compression_token():
+    # ".parquet" preceded by a token that is not a codec: parquet is simply the
+    # extension and there is no compression.
+    assert utils.split_name_tail("x.foo.parquet") == ("x.foo", "parquet", "")
+    assert utils.split_name_tail("data.v2.parquet") == ("data.v2", "parquet", "")
+
+
+def test_create_filename_parquet_after_non_compression_token():
+    ok, name = utils.create_filename(dict(_METRIC_BASE), "data.v2.parquet", "metric")
+    assert ok
+    # No codec token is invented; the name ends in plain ".parquet".
+    assert name.endswith("_raw.parquet")
+    assert ".zst" not in name
+
+
+def test_parse_filename_metric_name_without_extension_is_extra():
+    # Shaped like a metric and with valid dates, but the tail has no dot, so
+    # there is no extension; the log pattern needs one too.
+    kind, d = utils.parse_filename(
+        "history_float_2024-01-31T23:00:00Z_2024-01-31T23:59:59Z_3000_raw"
+    )
+    assert (kind, d) == ("extra", {})
+
+
+def test_parse_filename_log_shaped_with_invalid_dates_is_extra():
+    kind, d = utils.parse_filename("history_notadate_alsobad_3000_76Mb_raw.json.bz2")
+    assert (kind, d) == ("extra", {})
 
 
 def test_rename_from_data_rejects_dot_name(tmp_path):
