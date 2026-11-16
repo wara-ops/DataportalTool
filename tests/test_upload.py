@@ -1,5 +1,6 @@
 """Tests for dataportaltools.local_utils.upload.WCIBConnection."""
 
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -1348,3 +1349,48 @@ def test_delete_check_failure_is_explained(mocker, caplog):
     with caplog.at_level("ERROR", logger="toolslib.upload"):
         assert wc.delete(7, False, False) == 1
     assert "Could not check whether dataset 7 is empty" in caplog.text
+
+
+def _wrapped_parquet(path):
+    """Write a genuinely zstd-wrapped parquet file (``zstd x.parquet``) to ``path``."""
+    import io
+
+    import pandas as pd
+    import zstandard
+
+    buf = io.BytesIO()
+    pd.DataFrame({"t": [1], "v": [2]}).to_parquet(buf, compression="zstd")
+    path.write_bytes(zstandard.ZstdCompressor().compress(buf.getvalue()))
+    assert path.read_bytes()[:4] == bytes.fromhex("28b52ffd")
+
+
+@pytest.mark.parametrize("by_params", [True, False])
+def test_upload_data_files_refuses_zstd_wrapped_parquet(
+    tmp_path, mocker, caplog, by_params
+):
+    # Whether the name is built from --start/--stop/... or already follows the
+    # convention, a wrapped parquet must never be sent under a .zst.parquet name.
+    wc, _ = _connected()
+    name = (
+        "x.parquet.zst"
+        if by_params
+        else "h_float_2022-12-26T00:00:00_2022-12-27T00:00:00_5_raw.zst.parquet"
+    )
+    f = tmp_path / name
+    _wrapped_parquet(f)
+    send = mocker.patch.object(wc, "_upload_data", return_value={"path": "P"})
+    data = {
+        "datatype": "float",
+        "dataflag": "raw",
+        "start": "2022-12-26T00:00:00",
+        "stop": "2022-12-27T00:00:00",
+        "count": 5,
+    }
+    with caplog.at_level(logging.ERROR):
+        ret, resp = wc._upload_data_files(
+            1, [str(f)], data, "metric", False, name_from_params=by_params
+        )
+    assert ret == 1 and resp == {}
+    send.assert_not_called()
+    assert "wrapped in zst compression" in caplog.text
+    assert str(f) in caplog.text

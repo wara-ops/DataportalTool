@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from dataportaltools.local_utils import utils
+from dataportaltools.local_utils import sniff, utils
 
 
 @pytest.fixture
@@ -1071,3 +1071,311 @@ def test_timestamp_column_error_suggests_tscol():
 
     with pytest.raises(ValueError, match="--tscol"):
         utils._detect_timestamp_column(pd.DataFrame({"a": [1]}), "nope")
+
+
+# --------------------------------------------------------------------------- #
+# content sniffing: the bytes decide, the name can lie
+# --------------------------------------------------------------------------- #
+ZSTD_MAGIC = bytes.fromhex("28b52ffd")
+
+
+def _frame():
+    import pandas as pd
+
+    return pd.DataFrame(
+        {
+            "timestamp": ["2022-12-26T00:00:00Z", "2022-12-27T00:00:00Z"],
+            "value": [1.5, 2.5],
+        }
+    )
+
+
+def _wrap(src, dest, compression):
+    """Wrap the whole file ``src`` in an outer compressor, like ``zstd x.parquet``."""
+    import bz2
+    import gzip
+
+    import zstandard
+
+    data = src.read_bytes()
+    if compression == "zst":
+        data = zstandard.ZstdCompressor().compress(data)
+    elif compression == "gz":
+        data = gzip.compress(data)
+    else:
+        data = bz2.compress(data)
+    dest.write_bytes(data)
+    return dest
+
+
+@pytest.fixture
+def zstd_columns_parquet(tmp_path):
+    """The canonical production shape: plain parquet whose COLUMNS use zstd."""
+    import pyarrow.parquet as pq
+
+    p = tmp_path / "canonical.zst.parquet"
+    _frame().to_parquet(p, compression="zstd")
+    # Prove the fixture really is what production holds: zstd codec inside,
+    # PAR1 outside, and NOT starting with the zstd frame magic.
+    head = p.read_bytes()[:4]
+    assert head == b"PAR1" and head != ZSTD_MAGIC
+    assert pq.ParquetFile(p).metadata.row_group(0).column(0).compression == "ZSTD"
+    return p
+
+
+@pytest.fixture
+def plain_parquet(tmp_path):
+    p = tmp_path / "plain.parquet"
+    _frame().to_parquet(p, compression="snappy")
+    return p
+
+
+@pytest.fixture
+def wrapped_parquet(plain_parquet, tmp_path):
+    """A genuinely zstd-WRAPPED parquet file, as made by ``zstd x.parquet``."""
+    out = _wrap(plain_parquet, tmp_path / "wrapped.parquet.zst", "zst")
+    assert out.read_bytes()[:4] == ZSTD_MAGIC
+    return out
+
+
+def test_sniff_canonical_zst_parquet_is_plain_parquet(zstd_columns_parquet):
+    # The 33,179 production files: must NOT be classified as wrapped.
+    assert sniff.sniff_file(str(zstd_columns_parquet)) == sniff.Sniff("", "parquet")
+    assert sniff.check_not_wrapped_parquet(str(zstd_columns_parquet))
+
+
+def test_sniff_plain_parquet(plain_parquet):
+    assert sniff.sniff_file(str(plain_parquet)) == ("", "parquet")
+
+
+@pytest.mark.parametrize("compression", ["zst", "gz", "bz2"])
+def test_sniff_wrapped_parquet_reports_the_inner_format(
+    plain_parquet, tmp_path, compression
+):
+    wrapped = _wrap(plain_parquet, tmp_path / f"w.parquet.{compression}", compression)
+    assert sniff.sniff_file(str(wrapped)) == (compression, "parquet")
+
+
+@pytest.mark.parametrize("compression", ["zst", "gz", "bz2"])
+def test_sniff_wrapped_non_parquet_has_unknown_inner_format(tmp_path, compression):
+    p = tmp_path / "d.csv"
+    p.write_text("timestamp,v\n2022-12-26T00:00:00Z,1\n", encoding="utf-8")
+    wrapped = _wrap(p, tmp_path / f"d.csv.{compression}", compression)
+    assert sniff.sniff_file(str(wrapped)) == (compression, "")
+
+
+def test_sniff_uncompressed_non_parquet_is_unknown(tmp_path):
+    p = tmp_path / "d.pkl"
+    _frame().to_pickle(p)
+    assert sniff.sniff_file(str(p)) == ("", "")
+    c = tmp_path / "d.csv"
+    c.write_text("a,b\n1,2\n", encoding="utf-8")
+    assert sniff.sniff_file(str(c)) == ("", "")
+
+
+def test_sniff_short_file_is_classified_from_what_is_there(tmp_path):
+    p = tmp_path / "tiny.csv"
+    p.write_bytes(b"a")
+    assert sniff.sniff_file(str(p)) == ("", "")
+
+
+@pytest.mark.parametrize(
+    "head, compression",
+    [(ZSTD_MAGIC + b"junk", "zst"), (b"\x1f\x8bjunk", "gz"), (b"BZhjunk", "bz2")],
+)
+def test_sniff_corrupt_stream_keeps_outer_compression(tmp_path, head, compression):
+    p = tmp_path / "bad"
+    p.write_bytes(head)
+    assert sniff.sniff_file(str(p)) == (compression, "")
+
+
+def test_sniff_truncated_gzip_keeps_outer_compression(tmp_path):
+    p = tmp_path / "trunc.gz"
+    p.write_bytes(b"\x1f\x8b")  # magic only, no header
+    assert sniff.sniff_file(str(p)) == ("gz", "")
+
+
+@pytest.mark.parametrize("kind", ["empty", "missing", "directory"])
+def test_sniff_inconclusive_returns_none(tmp_path, kind):
+    p = tmp_path / "thing"
+    if kind == "empty":
+        p.write_bytes(b"")
+    elif kind == "directory":
+        p.mkdir()
+    assert sniff.sniff_file(str(p)) is None
+    # Inconclusive content never blocks: the name is all there is.
+    assert sniff.check_not_wrapped_parquet(str(p))
+
+
+def test_create_filename_refuses_zst_wrapped_parquet(wrapped_parquet, caplog):
+    with caplog.at_level(logging.ERROR, logger="toolslib.utils"):
+        ok, name = utils.create_filename(
+            dict(_METRIC_BASE), "x.parquet.zst", "metric", path=str(wrapped_parquet)
+        )
+    assert (ok, name) == (False, "")
+    assert str(wrapped_parquet) in caplog.text
+    assert "wrapped in zst compression" in caplog.text
+    assert "28 b5 2f fd" in caplog.text
+    assert "zstd -d" in caplog.text
+    assert "plain .parquet" in caplog.text
+
+
+def test_create_filename_refuses_even_a_zst_parquet_name(wrapped_parquet):
+    # The name already claims "plain parquet, zstd columns": the bytes disagree.
+    assert utils.create_filename(
+        dict(_METRIC_BASE), "x.zst.parquet", "metric", path=str(wrapped_parquet)
+    ) == (False, "")
+
+
+def test_create_filename_names_canonical_zst_parquet(zstd_columns_parquet):
+    ok, name = utils.create_filename(
+        dict(_METRIC_BASE),
+        "x.zst.parquet",
+        "metric",
+        path=str(zstd_columns_parquet),
+    )
+    assert ok and name.endswith("_raw.zst.parquet")
+
+
+def test_create_filename_without_a_path_does_not_look_at_bytes():
+    ok, name = utils.create_filename(dict(_METRIC_BASE), "x.parquet.zst", "metric")
+    assert ok and name.endswith("_raw.zst.parquet")
+
+
+def test_accept_datafile_refuses_wrapped_parquet(wrapped_parquet, caplog):
+    _, filedata = utils.parse_filename(
+        "h_float_2022-12-26T00:00:00_2022-12-27T00:00:00_5_raw.zst.parquet"
+    )
+    with caplog.at_level(logging.ERROR, logger="toolslib.utils"):
+        assert not utils.accept_datafile(str(wrapped_parquet), "metric", filedata)
+    assert f"Rejected {wrapped_parquet} is a parquet file wrapped in zst" in caplog.text
+    assert "Decompress it first" in caplog.text
+
+
+def test_accept_datafile_accepts_canonical_zst_parquet(zstd_columns_parquet):
+    _, filedata = utils.parse_filename(
+        "h_float_2022-12-26T00:00:00_2022-12-27T00:00:00_5_raw.zst.parquet"
+    )
+    assert utils.accept_datafile(str(zstd_columns_parquet), "metric", filedata)
+
+
+def test_rename_from_data_refuses_wrapped_parquet(wrapped_parquet):
+    with pytest.raises(ValueError, match="wrapped in zst compression"):
+        utils.rename_from_data(
+            str(wrapped_parquet), name="h", kind="metric", dtype="float"
+        )
+
+
+def test_rename_from_data_names_canonical_zst_parquet(zstd_columns_parquet):
+    ok, name = utils.rename_from_data(
+        str(zstd_columns_parquet), name="h", kind="metric", dtype="float"
+    )
+    assert ok and name.endswith("_2_raw.zst.parquet")
+
+
+def test_convert_and_rename_refuses_wrapped_parquet(wrapped_parquet):
+    with pytest.raises(ValueError, match="zstd -d"):
+        utils.convert_and_rename(
+            str(wrapped_parquet), name="h", kind="metric", dtype="float"
+        )
+
+
+@pytest.mark.parametrize(
+    "compression, command", [("gz", "gzip -d"), ("bz2", "bzip2 -d")]
+)
+def test_read_dataframe_refuses_other_wrapped_parquet(
+    plain_parquet, tmp_path, compression, command
+):
+    wrapped = _wrap(plain_parquet, tmp_path / f"w.parquet.{compression}", compression)
+    with pytest.raises(ValueError, match=command):
+        utils._read_dataframe(str(wrapped))
+
+
+def test_read_dataframe_reads_canonical_zst_parquet(zstd_columns_parquet):
+    assert len(utils._read_dataframe(str(zstd_columns_parquet))) == 2
+
+
+def test_read_dataframe_reads_plain_parquet(plain_parquet):
+    assert len(utils._read_dataframe(str(plain_parquet))) == 2
+
+
+def test_read_dataframe_reads_legacy_parquet_zst_name_by_content(
+    plain_parquet, tmp_path
+):
+    # Legacy ``.parquet.zst`` names are plain parquet; the content wins.
+    legacy = tmp_path / "legacy.parquet.zst"
+    legacy.write_bytes(plain_parquet.read_bytes())
+    assert len(utils._read_dataframe(str(legacy))) == 2
+
+
+@pytest.mark.parametrize("compression", ["zst", "gz", "bz2"])
+def test_read_dataframe_reads_compressed_pickle(tmp_path, compression):
+    src = tmp_path / "d.pkl"
+    _frame().to_pickle(src)
+    packed = _wrap(src, tmp_path / f"d.pkl.{compression}", compression)
+    assert len(utils._read_dataframe(str(packed))) == 2
+
+
+@pytest.mark.parametrize("compression", ["zst", "gz", "bz2"])
+def test_read_dataframe_reads_compressed_csv(tmp_path, compression):
+    src = tmp_path / "d.csv"
+    _frame().to_csv(src, index=False)
+    packed = _wrap(src, tmp_path / f"d.csv.{compression}", compression)
+    assert len(utils._read_dataframe(str(packed))) == 2
+
+
+def test_read_dataframe_reads_stored_zstd_suffix(tmp_path):
+    src = tmp_path / "d.pkl"
+    _frame().to_pickle(src)
+    packed = _wrap(src, tmp_path / "d.pkl.zstd", "zst")
+    assert len(utils._read_dataframe(str(packed))) == 2
+
+
+def test_read_dataframe_falls_back_to_name_when_content_is_silent(tmp_path):
+    # An empty file has no bytes to sniff, so the (csv) name decides and pandas
+    # reports the real problem.
+    import pandas as pd
+
+    p = tmp_path / "empty.csv"
+    p.write_bytes(b"")
+    with pytest.raises(pd.errors.EmptyDataError):
+        utils._read_dataframe(str(p))
+
+
+def test_read_dataframe_parquet_content_under_a_csv_name(plain_parquet, tmp_path):
+    lie = tmp_path / "d.csv"
+    lie.write_bytes(plain_parquet.read_bytes())
+    with pytest.raises(ValueError, match=r"plain parquet file .*says \.csv"):
+        utils._read_dataframe(str(lie))
+
+
+def test_read_dataframe_csv_content_under_a_parquet_name(tmp_path):
+    lie = tmp_path / "d.parquet"
+    lie.write_text("a,b\n1,2\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"named \.parquet but is not parquet"):
+        utils._read_dataframe(str(lie))
+
+
+def test_read_dataframe_wrapped_non_parquet_under_a_parquet_name(tmp_path):
+    src = tmp_path / "d.csv"
+    _frame().to_csv(src, index=False)
+    lie = _wrap(src, tmp_path / "d.zst.parquet", "zst")
+    with pytest.raises(ValueError, match=r"named \.parquet but is a zst stream"):
+        utils._read_dataframe(str(lie))
+
+
+def test_read_dataframe_gzip_name_over_plain_content(tmp_path):
+    lie = tmp_path / "d.csv.gz"
+    lie.write_text("a,b\n1,2\n", encoding="utf-8")
+    with pytest.raises(
+        ValueError, match="named as gz but its bytes say not compressed"
+    ):
+        utils._read_dataframe(str(lie))
+
+
+def test_read_dataframe_plain_name_over_compressed_content(tmp_path):
+    src = tmp_path / "src.csv"
+    _frame().to_csv(src, index=False)
+    lie = _wrap(src, tmp_path / "d.csv", "gz")
+    with pytest.raises(ValueError, match="named as uncompressed but its bytes say gz"):
+        utils._read_dataframe(str(lie))

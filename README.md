@@ -247,6 +247,13 @@ Limits and behaviour worth knowing:
   files are skipped up front with an error; split them by time window.
 - A bare `.pkl` is refused for new uploads. Use `.pkl.zst`, or convert the file
   with `--rename --apply`. Existing `.pkl` files can still be read and renamed.
+- A file's bytes outrank its name. A parquet file wrapped as a whole in zstd,
+  gzip or bzip2 (for example made with `zstd x.parquet`, first bytes
+  `28 b5 2f fd`) is refused: it is not a plain parquet file, and a
+  `.zst.parquet` name would claim it is. Decompress it (`zstd -d <file>`) and
+  upload the plain parquet. Genuine `.zst.parquet` files (plain parquet,
+  starting with `PAR1`, zstd inside the columns) are unaffected. `--rename`
+  likewise stops with a clear message when a name contradicts the content.
 - The tool sends the portal a short name such as `history.zst.parquet`; the
   portal builds the stored convention name from it and the metadata.
 - Uploading identical bytes again is reported as

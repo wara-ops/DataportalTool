@@ -8,6 +8,15 @@ import re
 from datetime import datetime, timezone
 from typing import Optional
 
+from .sniff import (
+    MAGIC_HEX,
+    PANDAS_CODEC,
+    Sniff,
+    check_not_wrapped_parquet,
+    sniff_file,
+    wrapped_parquet_message,
+)
+
 _logger = logging.getLogger("toolslib.utils")
 
 # Default to quiet; configure_logging() raises this when asked.
@@ -514,10 +523,13 @@ def accept_datafile(fname: str, kind: str, filedata: dict) -> bool:
         )
         return False
 
-    return True
+    # The name may lie about the bytes (see ``sniff.py``).
+    return check_not_wrapped_parquet(fname)
 
 
-def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
+def create_filename(
+    data: dict, fname: str, kind: str, path: Optional[str] = None
+) -> tuple[bool, str]:
     # This builds a name from many independent fields and validates each one
     # with an early return, which is clearer than nesting; the resulting
     # statement/branch/return counts are inherent to that validation.
@@ -542,6 +554,10 @@ def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
         File name
     kind : str
         Kind of filename, "metric", or "log"
+    path : str | None
+        The real file ``fname`` is taken from, when it exists. Its first bytes
+        are checked so a parquet file that is wrapped in zstd/gzip/bz2 is not
+        given a ``.zst.parquet`` name (a false claim). ``None`` skips the check.
 
     Returns
     -------
@@ -559,6 +575,9 @@ def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
             "Cannot build a file name: --kind must be 'metric' or 'log', got '%s'",
             kind,
         )
+        return False, ""
+
+    if path is not None and not check_not_wrapped_parquet(path):
         return False, ""
 
     # required fields are start, stop and count
@@ -657,28 +676,72 @@ def create_filename(data: dict, fname: str, kind: str) -> tuple[bool, str]:
     return True, new_name
 
 
-def _read_dataframe(path: str) -> object:
-    """Load ``path`` into a pandas DataFrame, dispatching on the extension.
+def _check_name_matches_content(
+    path: str, extension: str, name_compression: str, sniffed: Sniff
+) -> None:
+    """Raise ``ValueError`` when the file's name contradicts what its bytes say.
 
-    Supports ``.csv``, ``.parquet`` and ``.pkl`` (pandas pickle), each optionally
-    compressed (``.gz``/``.bz2``/``.zst``). pandas/pyarrow handle the formats and
-    the compression libraries; ``.zst`` needs the ``zstandard`` package, which is
-    a project dependency.
+    Whatever the name claims, the file is never read as something its bytes
+    deny, and a name is never trusted over conclusive content. (A wrapped
+    parquet file is rejected earlier, with its own message.)
+    """
+    if extension == "parquet":
+        if sniffed.format != "parquet" or sniffed.compression:
+            found = (
+                f"a {sniffed.compression} stream (it starts with "
+                f"{MAGIC_HEX[sniffed.compression]})"
+                if sniffed.compression
+                else "not parquet (it does not start with PAR1)"
+            )
+            raise ValueError(
+                f"{path} is named .parquet but is {found}. Check what the file "
+                "really is; a plain parquet file starts with PAR1."
+            )
+    elif sniffed.format == "parquet":
+        raise ValueError(
+            f"{path} is a plain parquet file (it starts with PAR1) but its name "
+            f"says .{extension}. Rename it to end in .parquet (or .zst.parquet if "
+            "its columns use the zstd codec) and try again."
+        )
+    elif sniffed.compression != name_compression:
+        raise ValueError(
+            f"{path} is named as {name_compression or 'uncompressed'} but its "
+            f"bytes say {sniffed.compression or 'not compressed'}. Rename it to "
+            "match its content, or (de)compress the file, and try again."
+        )
+
+
+def _read_dataframe(path: str) -> object:
+    """Load ``path`` into a pandas DataFrame, preferring content over the name.
+
+    Supports csv, parquet and pandas pickle, each optionally compressed
+    (gzip/bz2/zstd). The portal's rule is to dispatch on the bytes, because a
+    name can lie: the first bytes decide parquet (``PAR1``) and the outer
+    compression (see :func:`sniff_file`), and a name that contradicts them is a
+    clear error instead of a failure deep in pandas/pyarrow. Pickle and csv have
+    no reliable magic, so which of the two it is comes from the extension.
+    Content that cannot be read (empty or unreadable file) also falls back to
+    the name.
     """
     # Imported lazily so the heavy pandas import is only paid when a rename is
     # actually requested, not on every CLI invocation.
     import pandas as pd  # pylint: disable=import-outside-toplevel
 
-    lower = path.lower()
-    # Strip a trailing compression suffix to find the format extension.
-    stem = re.sub(r"\.(gz|bz2|zst|zstd)$", "", lower)
+    _, extension, name_compression = split_name_tail(path)
+    compression = "infer"  # pandas guesses from the name when content is silent
+    sniffed = sniff_file(path)
+    if sniffed is not None:
+        if sniffed.compression and sniffed.format == "parquet":
+            raise ValueError(wrapped_parquet_message(path, sniffed.compression))
+        _check_name_matches_content(path, extension, name_compression, sniffed)
+        compression = PANDAS_CODEC[sniffed.compression]
 
-    if stem.endswith(".parquet"):
+    if extension == "parquet":
         return pd.read_parquet(path)
-    if stem.endswith(".pkl"):
-        return pd.read_pickle(path)
-    if stem.endswith(".csv"):
-        return pd.read_csv(path)
+    if extension == "pkl":
+        return pd.read_pickle(path, compression=compression)
+    if extension == "csv":
+        return pd.read_csv(path, compression=compression)
     raise ValueError(f"Unsupported file format for '{path}' (use csv/parquet/pkl)")
 
 
@@ -786,7 +849,7 @@ def rename_from_data(
     # source basename but with the desired <name> as the base.
     _, extension, compression = split_name_tail(path)
     synthetic = f"{name}{format_suffix(extension, compression)}"  # ".csv.zst" etc.
-    return create_filename(data, synthetic, kind)
+    return create_filename(data, synthetic, kind, path=path)
 
 
 def normalize_dataframe(frame: object, skip_cols: Optional[list] = None) -> list:
